@@ -1,0 +1,28 @@
+env/** 
+test.py
+__pycache__/**
+**/__pycache__/** */
+**/__pycache__
+**/hip/** */
+**/hip
+**/checkpoints/** */
+**/checkpoints
+**/testfolder
+**/.ipynb_checkpoints
+*.pth
+*.pt
+*.log
+*.aux
+*.out
+coling_latex.*
+.vscode/
+*.gz
+*.pdf
+**/saved_code
+*.png
+*.bbl
+*.blg
+*.sty
+*.bib
+*.bst
+*.pth
