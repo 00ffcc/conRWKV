@@ -1,11 +1,15 @@
 ########################################################################################################
 # The RWKV Language Model - https://github.com/BlinkDL/RWKV-LM
+# 笑死，刚准备改就发现fla加了rwkv7的layer和model
 ########################################################################################################
 
 import torch, types, os, gc, math, json
 import numpy as np
 import torch.nn as nn
-from typing import List
+from typing import List, Optional, Union
+from fla.ops.rwkv7 import chunk_rwkv7, fused_recurrent_rwkv7
+from einops import rearrange
+
 from torch.nn import functional as F
 np.set_printoptions(precision=4, suppress=True, linewidth=200)
 torch.backends.cudnn.benchmark = True
@@ -70,12 +74,20 @@ class RWKV_Tmix_x070(torch.nn.Module):
         self.output = nn.Linear(C, C, bias=False)
         self.ln_x = nn.GroupNorm(H, C, eps=64e-5) # !!! notice eps value !!!
 
-    def forward(self, x, v_first, state:List[List[torch.Tensor]]):
+    def forward(self, 
+                x: torch.Tensor, 
+                v_first: torch.Tensor, 
+                state: List[List[torch.Tensor]],
+                cu_seqlens: torch.LongTensor
+                ):
         B, T, C = x.shape
         H = self.n_head
         x_prev = state[self.layer_id][0]
-        xx = torch.cat([x_prev.view(B, 1, C), x[:, :-1, :]], dim=1) - x
         state[self.layer_id][0] = x[:, -1, :]
+
+        xx = torch.cat([torch.empty(1, 1, C, device=x.device, dtype=x.dtype), x[:, :-1, :]], dim=1)
+        xx[0, cu_seqlens[:-1], :] = x_prev
+        xx = xx - x
 
         xr = x + xx * self.x_r
         xw = x + xx * self.x_w
@@ -99,7 +111,22 @@ class RWKV_Tmix_x070(torch.nn.Module):
         kk = F.normalize(kk.view(B,T,H,-1), dim=-1, p=2.0).view(B,T,C)
         k = k * (1 + (a-1) * self.k_a)
 
-        x, state[self.layer_id][1] = self.RWKV7_OP(r, w, k, v, -kk, kk*a, state[self.layer_id][1])
+        r, w, k, v, kk, a = map(lambda x: rearrange(x, 'b t (h d) -> b t h d', h=H), (r, w, k, v, kk, a))
+
+        x, state[self.layer_id][1] = chunk_rwkv7(
+            r=r,
+            log_w=w,
+            k=k,
+            v=v,
+            a=-kk,
+            b=kk * a,
+            scale=1.,
+            initial_state=state[self.layer_id][1],
+            output_final_state=True,
+            cu_seqlens=cu_seqlens,
+            head_first=False
+        )
+        
         x = self.ln_x(x.view(B * T, C)).view(B, T, C)
 
         x = x + ((r.view(B,T,H,-1)*k.view(B,T,H,-1)*self.r_k).sum(dim=-1, keepdim=True) * v.view(B,T,H,-1)).view(B,T,C)
@@ -107,27 +134,6 @@ class RWKV_Tmix_x070(torch.nn.Module):
         
         return x, v_first
     
-    def RWKV7_OP(self, r, w, k, v, a, b, state):
-        B, T, C = r.shape
-        H = C // self.head_size
-        N = self.head_size
-        r = r.view(B, T, H, N).float()
-        k = k.view(B, T, H, N).float()
-        v = v.view(B, T, H, N).float()
-        a = a.view(B, T, H, N).float()
-        b = b.view(B, T, H, N).float()
-        w = torch.exp(-torch.exp(w.view(B, T, H, N).float()))
-        out = torch.zeros((B, T, H, N), device=r.device, dtype=torch.float)
-
-        for t in range(T):
-            kk = k[:, t, :].view(B, H, 1, N)
-            rr = r[:, t, :].view(B, H, N, 1)
-            vv = v[:, t, :].view(B, H, N, 1)
-            aa = a[:, t, :].view(B, H, N, 1)
-            bb = b[:, t, :].view(B, H, 1, N)
-            state = state * w[: , t, :, None, :] + state @ aa @ bb + vv @ kk
-            out[:, t, :] = (state @ rr).view(B, H, N)
-        return out.view(B, T, C).to(dtype=self.dtype), state
     
 ########################################################################################################
 # RWKV ChannelMix
@@ -138,7 +144,6 @@ class RWKV_CMix_x070(torch.nn.Module):
         super().__init__()
         self.args = args
         self.layer_id = layer_id
-        self.time_shift = nn.ZeroPad2d((0, 0, 1, -1))
 
         with torch.no_grad():
             self.x_k = nn.Parameter(torch.empty(1, 1, args.n_embd))
@@ -146,11 +151,19 @@ class RWKV_CMix_x070(torch.nn.Module):
         self.key = nn.Linear(args.n_embd, args.dim_ffn, bias=False)
         self.value = nn.Linear(args.dim_ffn, args.n_embd, bias=False)
 
-    def forward(self, x, state:List[List[torch.Tensor]]):
+    def forward(self, 
+                x: torch.Tensor, 
+                state: List[List[torch.Tensor]], 
+                cu_seqlens: torch.LongTensor
+                ):
         B, T, C = x.shape
         x_prev = state[self.layer_id][2]
-        xx = torch.cat([x_prev.view(B, 1, C), x[:, :-1, :]], dim=1) - x
         state[self.layer_id][2] = x[:, -1, :]
+
+        xx = torch.cat([torch.empty(1, 1, C, device=x.device, dtype=x.dtype), x[:, :-1, :]], dim=1)
+        xx[0, cu_seqlens[:-1], :] = x_prev
+        xx = xx - x
+        
 
         k = x + xx * self.x_k
         k = torch.relu(self.key(k)) ** 2
@@ -172,11 +185,11 @@ class Block(torch.nn.Module):
         self.att = RWKV_Tmix_x070(args, layer_id)
         self.ffn = RWKV_CMix_x070(args, layer_id)
         
-    def forward(self, x, v_first, state:List[List[torch.Tensor]]):
+    def forward(self, x, v_first, state:List[List[torch.Tensor]], cu_seqlens):
 
-        xx, v_first = self.att(self.ln1(x), v_first, state)
+        xx, v_first = self.att(self.ln1(x), v_first, state, cu_seqlens)
         x = x + xx
-        x = x + self.ffn(self.ln2(x), state)
+        x = x + self.ffn(self.ln2(x), state, cu_seqlens)
 
         return x, v_first
 
@@ -199,7 +212,7 @@ class RWKV(nn.Module):
         self.head = nn.Linear(args.n_embd, args.vocab_size, bias=False)
     @staticmethod
     def from_pretrained(model_path):
-        z = torch.load(model_path, map_location='cpu')
+        z = torch.load(model_path, mmap=True, weights_only=True)
         z['ln0.weight'] = z['blocks.0.ln0.weight']
         z['ln0.bias'] = z['blocks.0.ln0.bias']
         args = types.SimpleNamespace()
@@ -216,14 +229,30 @@ class RWKV(nn.Module):
         model = model.to('cuda').to(dtype=DTYPE)
         return model
 
-    def forward(self, idx, state):
+    def forward(self, 
+                idx: Union[torch.LongTensor, List[torch.LongTensor]], 
+                state: List[List[torch.Tensor]], 
+                cu_seqlens: Optional[torch.LongTensor] = None
+                ):
+        '''
+        cu_seqlens (torch.LongTensor):
+            Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
+            consistent with the FlashAttention API.  
+            the start index of each segment.
+        '''
+        if cu_seqlens is None:
+            assert isinstance(idx, list), f"idx must be a list of LongTensors"
+            cu_seqlens = torch.cat([torch.LongTensor([0]), torch.cumsum(torch.LongTensor([i.shape[-1] for i in idx]), dim=0)], dim=0)
+            idx = torch.cat(idx, dim=-1)
+        assert idx.shape[0] == 1, "batch size must be 1"
+        assert state[0][0].shape[0] == cu_seqlens.shape[0]-1, "state shape error"
 
         x = self.emb(idx)
         x = self.ln0(x)
 
         v_first = torch.empty_like(x)
         for block in self.blocks:
-            x, v_first = block(x, v_first, state)
+            x, v_first = block(x, v_first, state, cu_seqlens)
 
         x = self.ln_out(x)
         x = self.head(x)
@@ -247,10 +276,10 @@ if __name__ == '__main__':
     with torch.no_grad():
 
         import sys
-        sys.path.append(r"..\..")
+        sys.path.append(r"../..")
         from tokenizer.tokenization_rwkv_world import RWKVWorldTokenizer
-        tokenizer=RWKVWorldTokenizer(vocab_file=r"..\..\tokenizer\rwkv_vocab_v20230424.txt")
-        MODEL_NAME = r"..\..\weights\v7-0.1b.pth"
+        tokenizer=RWKVWorldTokenizer(vocab_file=r"../../tokenizer/rwkv_vocab_v20230424.txt")
+        MODEL_NAME = r"../../weights/v7-0.1b.pth"
 
         model = RWKV.from_pretrained(MODEL_NAME)
         model.eval()
@@ -261,9 +290,9 @@ if __name__ == '__main__':
         input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to('cuda')
         print(f'\nInput:\n{input_ids}')
         state = model.empty_state(1)
-        out = model.forward(input_ids[:, :4], state)
+        out = model.forward([input_ids[:, :4]], state)
         print(state)
-        out = model.forward(input_ids[:, 4:], state)
+        out = model.forward([input_ids[:, 4:]], state)
         print(f'\nOutput:\n{out}')
 
         # logits of the last token => prediction for the next token    

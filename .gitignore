@@ -1,4 +1,5 @@
 env/** 
+env_wsl/**
 test.py
 __pycache__/**
 **/__pycache__/** */
@@ -26,3 +27,5 @@ coling_latex.*
 *.bib
 *.bst
 *.pth
+**.egg-info/** */
+**.egg-info/**
