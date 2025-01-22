@@ -1,6 +1,7 @@
 ########################################################################################################
 # The RWKV Language Model - https://github.com/BlinkDL/RWKV-LM
 # 笑死，刚准备改就发现fla加了rwkv7的layer和model
+# 1.21号晚上发现cu_seqlens有问题，想修一下，结果22号Zhiyuan Li就修了，太强了orz
 ########################################################################################################
 
 import torch, types, os, gc, math, json
@@ -83,7 +84,7 @@ class RWKV_Tmix_x070(torch.nn.Module):
         B, T, C = x.shape
         H = self.n_head
         x_prev = state[self.layer_id][0]
-        state[self.layer_id][0] = x[:, -1, :]
+        state[self.layer_id][0] = x[0, cu_seqlens[1:]-1, :]
 
         xx = torch.cat([torch.empty(1, 1, C, device=x.device, dtype=x.dtype), x[:, :-1, :]], dim=1)
         xx[0, cu_seqlens[:-1], :] = x_prev
@@ -97,7 +98,7 @@ class RWKV_Tmix_x070(torch.nn.Module):
         xg = x + xx * self.x_g
 
         r = self.receptance(xr)
-        w = -F.softplus(-(self.w0 + torch.tanh(xw @ self.w1) @ self.w2)) - 0.5 # soft-clamp to (-inf, -0.5)
+        w = -torch.exp(-F.softplus(-(self.w0 + torch.tanh(xw @ self.w1) @ self.w2)) - 0.5) # soft-clamp to (-inf, -0.5)
         k = self.key(xk)
         v = self.value(xv)
         if self.layer_id == 0:
@@ -126,6 +127,7 @@ class RWKV_Tmix_x070(torch.nn.Module):
             cu_seqlens=cu_seqlens,
             head_first=False
         )
+        # fla的state最后2维和官方实现(https://github.com/BlinkDL/RWKV-LM/blob/main/RWKV-v7/rwkv_v7_demo.py)是反的，要转置一下
         
         x = self.ln_x(x.view(B * T, C)).view(B, T, C)
 
@@ -158,7 +160,7 @@ class RWKV_CMix_x070(torch.nn.Module):
                 ):
         B, T, C = x.shape
         x_prev = state[self.layer_id][2]
-        state[self.layer_id][2] = x[:, -1, :]
+        state[self.layer_id][2] = x[0, cu_seqlens[1:]-1, :]
 
         xx = torch.cat([torch.empty(1, 1, C, device=x.device, dtype=x.dtype), x[:, :-1, :]], dim=1)
         xx[0, cu_seqlens[:-1], :] = x_prev
@@ -242,10 +244,10 @@ class RWKV(nn.Module):
         '''
         if cu_seqlens is None:
             assert isinstance(idx, list), f"idx must be a list of LongTensors"
-            cu_seqlens = torch.cat([torch.LongTensor([0]), torch.cumsum(torch.LongTensor([i.shape[-1] for i in idx]), dim=0)], dim=0)
+            cu_seqlens = torch.cat([torch.LongTensor([0]), torch.cumsum(torch.LongTensor([i.shape[-1] for i in idx]), dim=0)], dim=0).to('cuda')
             idx = torch.cat(idx, dim=-1)
         assert idx.shape[0] == 1, "batch size must be 1"
-        assert state[0][0].shape[0] == cu_seqlens.shape[0]-1, "state shape error"
+        assert state[0][0].shape[0] == cu_seqlens.shape[0]-1, f"state shape error {state[0][0].shape[0]} {cu_seqlens.shape[0]-1}"
 
         x = self.emb(idx)
         x = self.ln0(x)
@@ -257,7 +259,7 @@ class RWKV(nn.Module):
         x = self.ln_out(x)
         x = self.head(x)
 
-        return x
+        return x[0, cu_seqlens[1:]-1]
     def empty_state(self, batch_size):
         return [
                 [
@@ -289,23 +291,25 @@ if __name__ == '__main__':
         prompt = "The Eiffel tower is in the city of"
         input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to('cuda')
         print(f'\nInput:\n{input_ids}')
-        state = model.empty_state(1)
-        out = model.forward([input_ids[:, :4]], state)
-        print(state)
-        out = model.forward([input_ids[:, 4:]], state)
-        print(f'\nOutput:\n{out}')
+        state = model.empty_state(2)
+        outs = model.forward([input_ids[:, :4], input_ids[:, :6]], state)
+        outs = model.forward([input_ids[:, 4:], input_ids[:, 6:]], state)
+        # out = model.forward([input_ids], state)
+        # print(f'\nOutput:\n{out}')
 
         # logits of the last token => prediction for the next token    
-        out = out[0, -1]
-        
-        probs = F.softmax(out.float(), dim=-1) # compute softmax in float (more accurate)
+        for i in range(outs.shape[0]):
+            out = outs[i]
+            
+            probs = F.softmax(out.float(), dim=-1) # compute softmax in float (more accurate)
 
-        print(f'\n{prompt}')
+            print(f'\n{prompt}')
 
-        _, indices = torch.topk(probs, 10) # print top-10 possibilities
-        for i in range(len(indices)):
-            token_id = indices[i].item()
-            token = tokenizer.decode([token_id])
-            token_prob = probs[token_id].item()
-            print(token, f'[probability {token_prob:.2%}]')
+            _, indices = torch.topk(probs, 10) # print top-10 possibilities
+            for i in range(len(indices)):
+                token_id = indices[i].item()
+                token = tokenizer.decode([token_id])
+                token_prob = probs[token_id].item()
+                print(token, f'[probability {token_prob:.2%}]')
+
 
