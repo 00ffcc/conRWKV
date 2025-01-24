@@ -17,6 +17,7 @@
 import json
 import os
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
+from regex import F
 from transformers.tokenization_utils import AddedToken, PreTrainedTokenizer
 from transformers.utils import logging, to_py_obj
 from transformers.tokenization_utils_base import BatchEncoding
@@ -539,3 +540,10 @@ class RWKVWorldTokenizer(PreTrainedTokenizer):
         if len(input_ids) > self.model_max_length:
             input_ids = input_ids[-self.model_max_length:]
         return input_ids
+    
+    def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True) -> str:
+        roles = {
+            "user": "User: ",
+            "assistant": "Assistant: ",
+        }
+        return "\n\n".join([f"{roles[msg['role']]}{msg['content']}" for msg in messages]) + ("\n\nAssistant:" if add_generation_prompt else "")
