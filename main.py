@@ -1,7 +1,7 @@
 import asyncio
 import time
 from typing import List, Optional, Union, Dict
-
+import json
 import torch
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware import Middleware
@@ -88,7 +88,7 @@ class SamplingParams(BaseModel):
     temperature: float = 1.0
     top_p: float = 0.0
     frequency_penalty: float = 0.0
-    max_tokens: Optional[int] = None
+    max_completion_tokens: Optional[int] = None
     stop_sequences: Optional[List[str]] = None
 
 # Global variables
@@ -141,23 +141,15 @@ async def process_request_queue():
 
         # 4. Handle Streaming and Re-enqueue unfinished requests
         for i, request_item in enumerate(batch):
+            print("put completion in queue:", completions[i])
             if i in finished_requests:
                 # Complete request
                 # put final result and None(end marker)
-                if request_item["request"].stream:
-                    if len(completions[i]) > 0:
-                        request_item["stream_queue"].put_nowait(completions[i])
-                    request_item["stream_queue"].put_nowait(None)
-                else:
-                    request_item["stream_queue"].put_nowait(completions[i])
-                    request_item["stream_queue"].put_nowait(None)
+                request_item["stream_queue"].put_nowait(completions[i])
+                request_item["stream_queue"].put_nowait(None)
             else:
                 # Stream and re-enqueue
-                if request_item["request"].stream:
-                    # stream the newly generated tokens
-                    completion = completions[i]
-                    if len(completion) > 0:
-                        request_item["stream_queue"].put_nowait(completion)
+                request_item["stream_queue"].put_nowait(completions[i])
                 # Update input_ids and re-enqueue
                 request_item["input_ids"] = new_input_ids[i]
                 request_item["state"] = [
@@ -165,6 +157,7 @@ async def process_request_queue():
                                                 states[j][k][i:i+1] 
                                             for k in range(3)] 
                                         for j in range(model.args.n_layer)]
+                request_item["token_count"] = request_item.get("token_count", 0) + 1
                 request_queue.put_nowait(request_item)
 
 
@@ -217,7 +210,7 @@ def create_sampling_params(request: ChatCompletionRequest) -> SamplingParams:
         temperature=request.temperature,
         top_p=request.top_p,
         frequency_penalty=request.frequency_penalty,
-        max_tokens=request.max_completion_tokens,
+        max_completion_tokens=request.max_completion_tokens,
         stop_sequences=request.stop if isinstance(request.stop, list) else [request.stop] if request.stop else None,
     )
 
@@ -239,7 +232,7 @@ def sample_and_postprocess(logits: torch.Tensor, input_ids: List[torch.Tensor], 
             - A set of indices of requests that have finished generating.
     """
 
-    new_input_ids = []
+    new_input_ids = [None] * len(input_ids)
     completions = [""] * len(input_ids)
     finished_requests = set()
 
@@ -250,7 +243,7 @@ def sample_and_postprocess(logits: torch.Tensor, input_ids: List[torch.Tensor], 
 
         # Decode the new token
         new_token = tokenizer.decode(next_token, skip_special_tokens=True)
-
+        print("new_token:", new_token, "next_token:", next_token)
         # Update the completion
         completions[i] = new_token
 
@@ -264,7 +257,8 @@ def sample_and_postprocess(logits: torch.Tensor, input_ids: List[torch.Tensor], 
                 if stop_seq and stop_seq in new_token:
                     stop_criteria_met = True
                     break
-        if sampling_params.max_tokens and request_context["token_count"] >= sampling_params.max_tokens:
+        print("token_count:", request_context["token_count"], sampling_params.max_completion_tokens)
+        if sampling_params.max_completion_tokens and request_context["token_count"] >= sampling_params.max_completion_tokens:
             stop_criteria_met = True
 
         # If the request is finished, add it to the finished_requests set
@@ -272,7 +266,7 @@ def sample_and_postprocess(logits: torch.Tensor, input_ids: List[torch.Tensor], 
             finished_requests.add(i)
         else:
             # Otherwise, update the input IDs
-            new_input_ids.append(torch.cat([input_ids[i], next_token.to(device)], dim=-1))
+            new_input_ids[i] = next_token
 
     return new_input_ids, completions, finished_requests
 
@@ -339,26 +333,52 @@ async def chat_completions(request: ChatCompletionRequest, fastapi_request: Requ
                         }
         request_queue.put_nowait(request_item)
 
-        while True:
-            try:
-                completion = await stream_queue.get()
-                if completion is None:
+        if request.stream:
+            while True:
+                try:
+                    completion = await stream_queue.get()
+                    if completion is None:
+                        break
+                    print('completion:', completion)
+                    yield json.dumps({
+                        "id": "cmpl-" + str(time.time()),
+                        "object": "chat.completion.chunk",
+                        "created": int(time.time()),
+                        "model": request.model,
+                        "choices": [
+                            {
+                                "delta": {"content": completion},
+                                "index": 0,
+                                "finish_reason": None,
+                            }
+                        ],
+                        }).encode('utf-8')
+                except asyncio.CancelledError:
                     break
-                yield {
-                    "id": "cmpl-" + str(time.time()),
-                    "object": "chat.completion.chunk" if request.stream else "chat.completion",
-                    "created": int(time.time()),
-                    "model": request.model,
-                    "choices": [
-                        {
-                            "delta": {"content": completion} if request.stream else {"role": "assistant", "content": completion} ,
-                            "index": 0,
-                            "finish_reason": None if request.stream else "stop",
-                        }
-                    ],
+        else:
+            final_completion = ''
+            while True:
+                try:
+                    completion = await stream_queue.get()
+                    if completion is None:
+                        break
+                    print('completion:', completion)
+                    final_completion += completion
+                except asyncio.CancelledError:
+                    break
+            yield json.dumps({
+                "id": "cmpl-" + str(time.time()),
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": request.model,
+                "choices": [
+                    {
+                        "delta": {"role": "assistant", "content": completion},
+                        "index": 0,
+                        "finish_reason": "stop",
                     }
-            except asyncio.CancelledError:
-                break
+                ],
+                }).encode('utf-8')
 
     return StreamingResponse(stream_generator(), media_type="text/event-stream")
 
