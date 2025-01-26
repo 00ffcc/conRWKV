@@ -141,7 +141,6 @@ async def process_request_queue():
 
         # 4. Handle Streaming and Re-enqueue unfinished requests
         for i, request_item in enumerate(batch):
-            print("put completion in queue:", completions[i])
             if i in finished_requests:
                 # Complete request
                 # put final result and None(end marker)
@@ -191,7 +190,6 @@ def prepare_batch(batch: List[Dict]):
                     )
                  for k in range(3)]
              for j in range(model.args.n_layer)]
-    print("input_ids:", input_ids)
     return input_ids, request_contexts, sampling_params_list, states
 
 def create_sampling_params(request: ChatCompletionRequest) -> SamplingParams:
@@ -242,8 +240,7 @@ def sample_and_postprocess(logits: torch.Tensor, input_ids: List[torch.Tensor], 
         next_token = sample(logits[i], input_ids[i], request_context, sampling_params)
 
         # Decode the new token
-        new_token = tokenizer.decode(next_token, skip_special_tokens=True)
-        print("new_token:", new_token, "next_token:", next_token)
+        new_token = tokenizer.decode(next_token.squeeze(0)) # rwkv tokenizer only support dim=1
         # Update the completion
         completions[i] = new_token
 
@@ -257,7 +254,6 @@ def sample_and_postprocess(logits: torch.Tensor, input_ids: List[torch.Tensor], 
                 if stop_seq and stop_seq in new_token:
                     stop_criteria_met = True
                     break
-        print("token_count:", request_context["token_count"], sampling_params.max_completion_tokens)
         if sampling_params.max_completion_tokens and request_context["token_count"] >= sampling_params.max_completion_tokens:
             stop_criteria_met = True
 
@@ -299,7 +295,6 @@ def sample(logits: torch.Tensor, input_ids: torch.Tensor, request_context: Dict,
     
     logits.unsqueeze_(0)  # Add a batch dimension
     input_ids.unsqueeze_(0)  # Add a batch dimension
-    print(logits.shape, sampling_params)
 
     processed_logits = logits_processor(input_ids, logits)
 
@@ -339,7 +334,6 @@ async def chat_completions(request: ChatCompletionRequest, fastapi_request: Requ
                     completion = await stream_queue.get()
                     if completion is None:
                         break
-                    print('completion:', completion)
                     yield json.dumps({
                         "id": "cmpl-" + str(time.time()),
                         "object": "chat.completion.chunk",
@@ -362,7 +356,6 @@ async def chat_completions(request: ChatCompletionRequest, fastapi_request: Requ
                     completion = await stream_queue.get()
                     if completion is None:
                         break
-                    print('completion:', completion)
                     final_completion += completion
                 except asyncio.CancelledError:
                     break
@@ -373,7 +366,7 @@ async def chat_completions(request: ChatCompletionRequest, fastapi_request: Requ
                 "model": request.model,
                 "choices": [
                     {
-                        "delta": {"role": "assistant", "content": completion},
+                        "delta": {"role": "assistant", "content": final_completion},
                         "index": 0,
                         "finish_reason": "stop",
                     }
