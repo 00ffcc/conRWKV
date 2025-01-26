@@ -7,7 +7,7 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 from transformers.generation.logits_process import (
     LogitsProcessorList,
@@ -56,9 +56,11 @@ MAX_BATCH_SIZE = 32  # Maximum number of requests in a batch
 # Request Data Model (OpenAI API format)
 class ChatCompletionRequest(BaseModel):
     model: str
-    messages: List[Dict[str, str]]  # [{"role": "user", "content": "..."}]
+    messages: Optional[List[Dict[str, str]]] = None  # [{"role": "user", "content": "..."}]
+    prompt: Optional[str] = None
     frequency_penalty: Optional[float] = 0.0
     max_completion_tokens: Optional[int] = None
+    max_tokens: Optional[int] = None # if max_completion_tokens is not set, max_tokens is used for completion
     n: Optional[int] = 1
     seed: Optional[int] = None  # Could be useful for reproducibility. Not implemented here.
     stop: Optional[Union[str, List[str]]] = None
@@ -80,6 +82,16 @@ class ChatCompletionRequest(BaseModel):
         if value == 0.0 and values.data.get("temperature") == 0.0:
             raise ValueError("temperature and top_p cannot both be 0")
         return value
+    
+    # add validation so user can't set both messages and prompt or neither
+    @model_validator(mode='after')
+    def check_messages_prompt(self):
+        if self.messages is not None and self.prompt is not None:
+            raise ValueError("Both messages and prompt cannot be set at the same time")
+        if self.messages is None and self.prompt is None:
+            raise ValueError("Either messages or prompt must be set")
+        return self
+
 
 class SamplingParams(BaseModel):
     """Sampling parameters for text generation."""
@@ -312,11 +324,16 @@ async def chat_completions(request: ChatCompletionRequest, fastapi_request: Requ
     if request.n > 1:
         raise HTTPException(status_code=400, detail="n > 1 is not yet supported.")
 
-    # Prepare the prompt
-    prompt = tokenizer.apply_chat_template(request.messages, tokenize=False, add_generation_prompt=True)
-
+    if request.messages:
+        # Prepare the prompt
+        prompt = tokenizer.apply_chat_template(request.messages, tokenize=False, add_generation_prompt=True)
+    else:
+        prompt = request.prompt
     # Tokenize the input
     input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
+
+    if request.max_completion_tokens is None:
+        request.max_completion_tokens = request.max_tokens
 
     async def stream_generator():
         stream_queue:asyncio.Queue = asyncio.Queue()
