@@ -23,6 +23,11 @@ from contextlib import asynccontextmanager
 async def lifespan(app: FastAPI):
     global background_task
     load_model()
+    # 先跑一次，编译下kernel...
+    # TODO: 还有能不能优雅点编译kernel
+    state = model.empty_state(1)
+    input_ids = torch.zeros((1, 1024), dtype=torch.int32, device='cuda')
+    model.forward([input_ids], state)
     background_task = asyncio.create_task(process_request_queue())
     yield
     if background_task:
@@ -46,9 +51,7 @@ app = FastAPI(title="LLM Backend with Continuous Batching",
 
 
 # Model Configuration (Move to a config file for production)
-MODEL_NAME = "meta-llama/Llama-2-7b-chat-hf"  # Replace with your desired model
-# TORCH_DTYPE = torch.float16 # or torch.bfloat16, torch.float32, etc.
-# use_fp8 = False
+
 
 MAX_BATCH_SIZE = 32  # Maximum number of requests in a batch
 

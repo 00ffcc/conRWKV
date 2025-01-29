@@ -28,6 +28,8 @@ DTYPE = torch.half # better
 # RWKV TimeMix
 ########################################################################################################
 
+MAX_T = 1024
+
 class RWKV_Tmix_x070(torch.nn.Module):
     def __init__(self, args, layer_id):
         super().__init__()
@@ -114,6 +116,14 @@ class RWKV_Tmix_x070(torch.nn.Module):
 
         r, w, k, v, kk, a = map(lambda x: rearrange(x, 'b t (h d) -> b t h d', h=H), (r, w, k, v, kk, a))
 
+        # 都pad到MAX_T，防止重新编译kernel...真的没有什么优雅点的方式吗
+        r = torch.cat([r, torch.zeros(B, MAX_T-T, H, C//H, device=x.device, dtype=x.dtype)], dim=1)
+        w = torch.cat([w, torch.zeros(B, MAX_T-T, H, C//H, device=x.device, dtype=x.dtype)], dim=1)
+        k = torch.cat([k, torch.zeros(B, MAX_T-T, H, C//H, device=x.device, dtype=x.dtype)], dim=1)
+        v = torch.cat([v, torch.zeros(B, MAX_T-T, H, C//H, device=x.device, dtype=x.dtype)], dim=1)
+        kk = torch.cat([kk, torch.zeros(B, MAX_T-T, H, C//H, device=x.device, dtype=x.dtype)], dim=1)
+        a = torch.cat([a, torch.zeros(B, MAX_T-T, H, C//H, device=x.device, dtype=x.dtype)], dim=1)
+
         x, state[self.layer_id][1] = chunk_rwkv7(
             r=r,
             log_w=w,
@@ -128,9 +138,14 @@ class RWKV_Tmix_x070(torch.nn.Module):
             head_first=False
         )
         # fla的state最后2维和官方实现(https://github.com/BlinkDL/RWKV-LM/blob/main/RWKV-v7/rwkv_v7_demo.py)是反的，要转置一下
+        x = x[:, :T, :, :]
         
         x = self.ln_x(x.view(B * T, C)).view(B, T, C)
 
+        r = r[:, :T, :, :]
+        k = k[:, :T, :, :]
+        v = v[:, :T, :, :]
+        
         x = x + ((r.view(B,T,H,-1)*k.view(B,T,H,-1)*self.r_k).sum(dim=-1, keepdim=True) * v.view(B,T,H,-1)).view(B,T,C)
         x = self.output(x * g)
         
