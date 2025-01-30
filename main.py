@@ -25,9 +25,10 @@ async def lifespan(app: FastAPI):
     load_model()
     # 先跑一次，编译下kernel...
     # TODO: 还有能不能优雅点编译kernel
-    state = model.empty_state(1)
-    input_ids = torch.zeros((1, 1024), dtype=torch.int32, device='cuda')
-    model.forward([input_ids], state)
+    with torch.no_grad():
+        state = model.empty_state(1)
+        input_ids = torch.zeros((1, 1024), dtype=torch.int32, device='cuda')
+        model.forward([input_ids], state)
     background_task = asyncio.create_task(process_request_queue())
     yield
     if background_task:
@@ -65,11 +66,13 @@ class ChatCompletionRequest(BaseModel):
     max_completion_tokens: Optional[int] = None
     max_tokens: Optional[int] = None # if max_completion_tokens is not set, max_tokens is used for completion
     n: Optional[int] = 1
+    best_of: Optional[int] = 1
     seed: Optional[int] = None  # Could be useful for reproducibility. Not implemented here.
     stop: Optional[Union[str, List[str]]] = None
     stream: Optional[bool] = False
     temperature: Optional[float] = 1.0
     top_p: Optional[float] = 1.0
+    ignore_eos: Optional[bool] = False
 
     # add validation so user can't set temperature and top_p to 0 at the same time
     @field_validator("temperature")
@@ -93,6 +96,12 @@ class ChatCompletionRequest(BaseModel):
             raise ValueError("Both messages and prompt cannot be set at the same time")
         if self.messages is None and self.prompt is None:
             raise ValueError("Either messages or prompt must be set")
+        return self
+    # n>1 or best_of>1 is not supported yet
+    @model_validator(mode='after')
+    def check_n_best_of(self):
+        if self.n > 1 or self.best_of > 1:
+            raise ValueError("n>1 or best_of>1 is not supported yet")
         return self
 
 
@@ -324,9 +333,6 @@ def sample(logits: torch.Tensor, input_ids: torch.Tensor, request_context: Dict,
 # API Endpoint
 @app.post("/v1/chat/completions")
 async def chat_completions(request: ChatCompletionRequest, fastapi_request: Request):
-    if request.n > 1:
-        raise HTTPException(status_code=400, detail="n > 1 is not yet supported.")
-
     if request.messages:
         # Prepare the prompt
         prompt = tokenizer.apply_chat_template(request.messages, tokenize=False, add_generation_prompt=True)

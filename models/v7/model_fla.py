@@ -4,6 +4,7 @@
 # 1.21号晚上发现cu_seqlens有问题，想修一下，结果22号Zhiyuan Li就修了，太强了orz
 ########################################################################################################
 
+from sympy import N
 import torch, types, os, gc, math, json
 import numpy as np
 import torch.nn as nn
@@ -85,6 +86,7 @@ class RWKV_Tmix_x070(torch.nn.Module):
                 ):
         B, T, C = x.shape
         H = self.n_head
+        N = self.head_size
         x_prev = state[self.layer_id][0]
         state[self.layer_id][0] = x[0, cu_seqlens[1:]-1, :]
 
@@ -114,15 +116,14 @@ class RWKV_Tmix_x070(torch.nn.Module):
         kk = F.normalize(kk.view(B,T,H,-1), dim=-1, p=2.0).view(B,T,C)
         k = k * (1 + (a-1) * self.k_a)
 
-        r, w, k, v, kk, a = map(lambda x: rearrange(x, 'b t (h d) -> b t h d', h=H), (r, w, k, v, kk, a))
 
         # 都pad到MAX_T，防止重新编译kernel...真的没有什么优雅点的方式吗
-        r = torch.cat([r, torch.zeros(B, MAX_T-T, H, C//H, device=x.device, dtype=x.dtype)], dim=1)
-        w = torch.cat([w, torch.zeros(B, MAX_T-T, H, C//H, device=x.device, dtype=x.dtype)], dim=1)
-        k = torch.cat([k, torch.zeros(B, MAX_T-T, H, C//H, device=x.device, dtype=x.dtype)], dim=1)
-        v = torch.cat([v, torch.zeros(B, MAX_T-T, H, C//H, device=x.device, dtype=x.dtype)], dim=1)
-        kk = torch.cat([kk, torch.zeros(B, MAX_T-T, H, C//H, device=x.device, dtype=x.dtype)], dim=1)
-        a = torch.cat([a, torch.zeros(B, MAX_T-T, H, C//H, device=x.device, dtype=x.dtype)], dim=1)
+        r.resize_((B, MAX_T, H, N))
+        w.resize_((B, MAX_T, H, N))
+        k.resize_((B, MAX_T, H, N))
+        v.resize_((B, MAX_T, H, N))
+        kk.resize_((B, MAX_T, H, N))
+        a.resize_((B, MAX_T, H, N))
 
         x, state[self.layer_id][1] = chunk_rwkv7(
             r=r,
@@ -138,17 +139,18 @@ class RWKV_Tmix_x070(torch.nn.Module):
             head_first=False
         )
         # fla的state最后2维和官方实现(https://github.com/BlinkDL/RWKV-LM/blob/main/RWKV-v7/rwkv_v7_demo.py)是反的，要转置一下
-        x = x[:, :T, :, :]
         
-        x = self.ln_x(x.view(B * T, C)).view(B, T, C)
+        x.resize_((B * T, C))
+        x = self.ln_x(x).view(B, T, C)
 
-        r = r[:, :T, :, :]
-        k = k[:, :T, :, :]
-        v = v[:, :T, :, :]
+        r.resize_((B, T, H, N))
+        k.resize_((B, T, H, N))
+        v.resize_((B, T, H, N))
         
-        x = x + ((r.view(B,T,H,-1)*k.view(B,T,H,-1)*self.r_k).sum(dim=-1, keepdim=True) * v.view(B,T,H,-1)).view(B,T,C)
+        x = x + ((r * k * self.r_k).sum(dim=-1, keepdim=True) * v).view(B, T, C)
         x = self.output(x * g)
-        
+
+        v_first.resize_((B, T, C))
         return x, v_first
     
     
