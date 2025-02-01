@@ -4,16 +4,11 @@
 # 1.21号晚上发现cu_seqlens有问题，想修一下，结果22号Zhiyuan Li就修了，太强了orz
 ########################################################################################################
 
-from sympy import N
-import torch, types, os, gc, math, json
-import numpy as np
+import torch, types
 import torch.nn as nn
 from typing import List, Optional, Union
 from fla.ops.rwkv7 import chunk_rwkv7, fused_recurrent_rwkv7
-from einops import rearrange
-
 from torch.nn import functional as F
-np.set_printoptions(precision=4, suppress=True, linewidth=200)
 torch.backends.cudnn.benchmark = True
 torch.backends.cudnn.allow_tf32 = True
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -29,7 +24,6 @@ DTYPE = torch.half # better
 # RWKV TimeMix
 ########################################################################################################
 
-MAX_T = 1024
 
 class RWKV_Tmix_x070(torch.nn.Module):
     def __init__(self, args, layer_id):
@@ -117,13 +111,13 @@ class RWKV_Tmix_x070(torch.nn.Module):
         k = k * (1 + (a-1) * self.k_a)
 
 
-        # 都pad到MAX_T，防止重新编译kernel...真的没有什么优雅点的方式吗
-        r.resize_((B, MAX_T, H, N))
-        w.resize_((B, MAX_T, H, N))
-        k.resize_((B, MAX_T, H, N))
-        v.resize_((B, MAX_T, H, N))
-        kk.resize_((B, MAX_T, H, N))
-        a.resize_((B, MAX_T, H, N))
+
+        r.resize_((B, T, H, N))
+        w.resize_((B, T, H, N))
+        k.resize_((B, T, H, N))
+        v.resize_((B, T, H, N))
+        kk.resize_((B, T, H, N))
+        a.resize_((B, T, H, N))
 
         x, state[self.layer_id][1] = chunk_rwkv7(
             r=r,
@@ -143,10 +137,6 @@ class RWKV_Tmix_x070(torch.nn.Module):
         x.resize_((B * T, C))
         x = self.ln_x(x).view(B, T, C)
 
-        r.resize_((B, T, H, N))
-        k.resize_((B, T, H, N))
-        v.resize_((B, T, H, N))
-        
         x = x + ((r * k * self.r_k).sum(dim=-1, keepdim=True) * v).view(B, T, C)
         x = self.output(x * g)
 
@@ -330,3 +320,13 @@ if __name__ == '__main__':
                 print(token, f'[probability {token_prob:.2%}]')
 
 
+        # input_ids = torch.zeros((1, 1024), dtype=torch.long, device='cuda')
+        # state = model.empty_state(1)
+        # import time
+        # start_time = time.time()
+        # model.forward([input_ids[:, :200]], state)
+        # print(f"Time elapsed: {time.time() - start_time:.2f}s")
+        # model.forward([input_ids[:, :800]], state)
+        # print(f"Time elapsed: {time.time() - start_time:.2f}s")
+        # # model.forward([input_ids[:, :500]], state)
+        # # print(f"Time elapsed: {time.time() - start_time:.2f}s")

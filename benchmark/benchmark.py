@@ -313,14 +313,11 @@ def get_model(pretrained_model_name_or_path: str) -> str:
 
 
 def get_tokenizer(pretrained_model_name_or_path: str, ) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
-    if pretrained_model_name_or_path.endswith('.json') or pretrained_model_name_or_path.endswith('.model'):
-        from sglang.srt.hf_transformers_utils import get_tokenizer
-
-        return get_tokenizer(pretrained_model_name_or_path)
-
-    if pretrained_model_name_or_path is not None and not os.path.exists(pretrained_model_name_or_path):
-        pretrained_model_name_or_path = get_model(pretrained_model_name_or_path)
-    return AutoTokenizer.from_pretrained(pretrained_model_name_or_path, trust_remote_code=True)
+    import sys
+    sys.path.append(r"..")
+    from tokenizer.tokenization_rwkv_world import RWKVWorldTokenizer
+    tokenizer=RWKVWorldTokenizer(vocab_file=r"../tokenizer/rwkv_vocab_v20230424.txt")
+    return tokenizer
 
 
 ASYNC_REQUEST_FUNCS = {
@@ -361,7 +358,7 @@ class BenchmarkMetrics:
     median_e2e_latency_ms: float
 
 
-SHAREGPT_URL = 'https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json'  # noqa
+SHAREGPT_URL = 'https://hf-mirror.com/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json'  # noqa
 
 
 def download_and_cache_file(url: str, filename: Optional[str] = None):
@@ -806,13 +803,14 @@ def run_benchmark(args_: argparse.Namespace):
             'vllm': 8000,
             'trt': 8000,
             'gserver': 9988,
+            'continuousRWKV': 8000,
         }.get(args.backend, 30000)
 
     model_url = (f'{args.base_url}/v1/models' if args.base_url else f'http://{args.host}:{args.port}/v1/models')
 
     if args.backend in ['sglang', 'sglang-native']:
         api_url = (f'{args.base_url}/generate' if args.base_url else f'http://{args.host}:{args.port}/generate')
-    elif args.backend in ['sglang-oai', 'vllm', 'lmdeploy']:
+    elif args.backend in ['sglang-oai', 'vllm', 'lmdeploy', 'continuousRWKV']:
         api_url = (f'{args.base_url}/v1/completions'
                    if args.base_url else f'http://{args.host}:{args.port}/v1/completions')
     elif args.backend == 'trt':
@@ -931,7 +929,7 @@ if __name__ == '__main__':
         '--backend',
         type=str,
         choices=list(ASYNC_REQUEST_FUNCS.keys()),
-        default='sglang',
+        default='continuousRWKV',
         help='Must specify a backend, depending on the LLM Inference Engine.',
     )
     parser.add_argument(

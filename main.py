@@ -27,8 +27,9 @@ async def lifespan(app: FastAPI):
     # TODO: 还有能不能优雅点编译kernel
     with torch.no_grad():
         state = model.empty_state(1)
-        input_ids = torch.zeros((1, 1024), dtype=torch.int32, device='cuda')
-        model.forward([input_ids], state)
+        for T in [16, 32, 64]:
+            input_ids = torch.zeros((1, T), dtype=torch.int32, device='cuda')
+            model.forward([input_ids], state)
     background_task = asyncio.create_task(process_request_queue())
     yield
     if background_task:
@@ -54,8 +55,8 @@ app = FastAPI(title="LLM Backend with Continuous Batching",
 # Model Configuration (Move to a config file for production)
 
 
-MAX_BATCH_SIZE = 32  # Maximum number of requests in a batch
-
+# MAX_BATCH_SIZE = 32  # Maximum number of requests in a batch
+MAX_SEQ_LEN = 4096
 
 # Request Data Model (OpenAI API format)
 class ChatCompletionRequest(BaseModel):
@@ -134,11 +135,17 @@ def load_model():
 async def process_request_queue():
     while True:
         batch = []
-        # get at most MAX_BATCH_SIZE requests from the queue
-        for _ in range(MAX_BATCH_SIZE):
+        # input_ids的总长度不能超过MAX_SEQ_LEN
+        while True:
             try:
                 request_item = await asyncio.wait_for(request_queue.get(), timeout=0.1)  # Non-blocking get with timeout
+                sum_len = sum(len(request_item["input_ids"][0]) for request_item in batch)
+                if sum_len + len(request_item["input_ids"][0]) > MAX_SEQ_LEN:
+                    request_item["next_input_ids"] = request_item["input_ids"][:, MAX_SEQ_LEN-sum_len:]
+                    request_item["input_ids"] = request_item["input_ids"][:, :MAX_SEQ_LEN-sum_len]
                 batch.append(request_item)
+                if sum_len + len(request_item["input_ids"][0]) == MAX_SEQ_LEN:
+                    break
             except asyncio.TimeoutError:
                 break  # No more requests in the queue
 
@@ -170,6 +177,16 @@ async def process_request_queue():
                 # put final result and None(end marker)
                 request_item["stream_queue"].put_nowait(completions[i])
                 request_item["stream_queue"].put_nowait(None)
+            elif request_item["next_input_ids"] is not None:
+                # chunk处理，仍然处于prefill阶段
+                request_item["input_ids"] = request_item["next_input_ids"]
+                request_item["next_input_ids"] = None
+                request_item["state"] = [
+                                            [
+                                                states[j][k][i:i+1] 
+                                            for k in range(3)] 
+                                        for j in range(model.args.n_layer)]
+                request_queue.put_nowait(request_item)
             else:
                 # Stream and re-enqueue
                 request_item["stream_queue"].put_nowait(completions[i])
@@ -349,6 +366,7 @@ async def chat_completions(request: ChatCompletionRequest, fastapi_request: Requ
         request_item = {
                             "request": request, 
                             "input_ids": input_ids, 
+                            "next_input_ids": None, # 用于分chunk处理
                             "stream_queue": stream_queue, 
                             "state": model.empty_state(1)
                         }
