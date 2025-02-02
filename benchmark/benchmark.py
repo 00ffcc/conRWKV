@@ -173,16 +173,17 @@ async def async_request_openai_completions(
                             continue
 
                         chunk = remove_prefix(chunk_bytes.decode('utf-8'), 'data: ')
+                        # print(chunk)
                         latency = time.perf_counter() - st
                         if chunk == '[DONE]':
                             pass
                         else:
                             data = json.loads(chunk)
-
+                            # print(data)
                             # NOTE: Some completion API might have a last
                             # usage summary response without a token so we
                             # want to check a token was generated
-                            if data['choices'][0]['text']:
+                            if data['choices'][0]['delta']['content']:
                                 timestamp = time.perf_counter()
                                 # First token
                                 if ttft == 0.0:
@@ -194,7 +195,7 @@ async def async_request_openai_completions(
                                     output.itl.append(timestamp - most_recent_timestamp)
 
                                 most_recent_timestamp = timestamp
-                                generated_text += data['choices'][0]['text']
+                                generated_text += data['choices'][0]['delta']['content']
 
                     output.generated_text = generated_text
                     output.success = True
@@ -810,9 +811,12 @@ def run_benchmark(args_: argparse.Namespace):
 
     if args.backend in ['sglang', 'sglang-native']:
         api_url = (f'{args.base_url}/generate' if args.base_url else f'http://{args.host}:{args.port}/generate')
-    elif args.backend in ['sglang-oai', 'vllm', 'lmdeploy', 'continuousRWKV']:
+    elif args.backend in ['sglang-oai', 'vllm', 'lmdeploy']:
         api_url = (f'{args.base_url}/v1/completions'
                    if args.base_url else f'http://{args.host}:{args.port}/v1/completions')
+    elif args.backend in ['continuousRWKV']:
+        api_url = (f'{args.base_url}/v1/chat/completions'
+                   if args.base_url else f'http://{args.host}:{args.port}/v1/chat/completions')
     elif args.backend == 'trt':
         api_url = (
             f'{args.base_url}/v2/models/ensemble/generate_stream'

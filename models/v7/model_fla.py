@@ -220,7 +220,7 @@ class RWKV(nn.Module):
         self.ln_out = nn.LayerNorm(args.n_embd)
         self.head = nn.Linear(args.n_embd, args.vocab_size, bias=False)
     @staticmethod
-    def from_pretrained(model_path):
+    def from_pretrained(model_path, device):
         z = torch.load(model_path, mmap=True, weights_only=True)
         z['ln0.weight'] = z['blocks.0.ln0.weight']
         z['ln0.bias'] = z['blocks.0.ln0.bias']
@@ -235,7 +235,8 @@ class RWKV(nn.Module):
         args.D_GATE_LORA = z['blocks.1.att.g1'].shape[1]
         model = RWKV(args)
         model.load_state_dict(z, strict=False)
-        model = model.to('cuda').to(dtype=DTYPE)
+        model = model.to(device).to(dtype=DTYPE)
+        model.device = device
         return model
 
     def forward(self, 
@@ -251,7 +252,7 @@ class RWKV(nn.Module):
         '''
         if cu_seqlens is None:
             assert isinstance(idx, list), f"idx must be a list of LongTensors"
-            cu_seqlens = torch.cat([torch.LongTensor([0]), torch.cumsum(torch.LongTensor([i.shape[-1] for i in idx]), dim=0)], dim=0).to('cuda')
+            cu_seqlens = torch.cat([torch.LongTensor([0]), torch.cumsum(torch.LongTensor([i.shape[-1] for i in idx]), dim=0)], dim=0).to(self.device)
             idx = torch.cat(idx, dim=-1)
         assert idx.shape[0] == 1, "batch size must be 1"
         assert state[0][0].shape[0] == cu_seqlens.shape[0]-1, f"state shape error {state[0][0].shape[0]} {cu_seqlens.shape[0]-1}"
@@ -267,15 +268,20 @@ class RWKV(nn.Module):
         x = self.head(x)
 
         return x[0, cu_seqlens[1:]-1]
-    def empty_state(self, batch_size):
+    def empty_state(self, batch_size, device=None):
+        if device is None:
+            device = self.device
         return [
                 [
-                    torch.zeros(batch_size, self.args.n_embd, dtype=DTYPE, device='cuda'),
-                    torch.zeros(batch_size, self.args.n_embd // self.args.head_size, self.args.head_size, self.args.head_size, dtype=torch.float32, device='cuda'),
-                    torch.zeros(batch_size, self.args.n_embd, dtype=DTYPE, device='cuda'),
+                    torch.zeros(batch_size, self.args.n_embd, dtype=DTYPE, device=device),
+                    torch.zeros(batch_size, self.args.n_embd // self.args.head_size, self.args.head_size, self.args.head_size, dtype=torch.float32, device=device),
+                    torch.zeros(batch_size, self.args.n_embd, dtype=DTYPE, device=device),
                 ] 
                 for _ in range(self.args.n_layer)]
-    
+    def move_state(self, state, device=None):
+        if device is None:
+            device = self.device
+        return [[s.to(device) for s in layer] for layer in state]
 
 ########################################################################################################
 # RWKV Inference

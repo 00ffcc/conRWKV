@@ -19,6 +19,7 @@ from transformers.generation.logits_process import (
 
 from contextlib import asynccontextmanager
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global background_task
@@ -28,7 +29,7 @@ async def lifespan(app: FastAPI):
     with torch.no_grad():
         state = model.empty_state(1)
         for T in [16, 32, 64]:
-            input_ids = torch.zeros((1, T), dtype=torch.int32, device='cuda')
+            input_ids = torch.zeros((1, T), dtype=torch.int32, device=device)
             model.forward([input_ids], state)
     background_task = asyncio.create_task(process_request_queue())
     yield
@@ -56,7 +57,6 @@ app = FastAPI(title="LLM Backend with Continuous Batching",
 
 
 # MAX_BATCH_SIZE = 32  # Maximum number of requests in a batch
-MAX_SEQ_LEN = 4096
 
 # Request Data Model (OpenAI API format)
 class ChatCompletionRequest(BaseModel):
@@ -126,9 +126,9 @@ from models.v7.model_fla import RWKV
 from tokenizer.tokenization_rwkv_world import RWKVWorldTokenizer
 def load_model():
     global model, tokenizer, device
+    device = args.device
     tokenizer=RWKVWorldTokenizer(vocab_file=r"./tokenizer/rwkv_vocab_v20230424.txt")
-    model = RWKV.from_pretrained(r"./weights/v7-0.1b.pth")
-    device = 'cuda'
+    model = RWKV.from_pretrained(r"./weights/v7-0.1b.pth", device=device)
     
 
 # Background task for processing requests from the queue
@@ -136,7 +136,7 @@ async def process_request_queue():
     while True:
         batch = []
         # input_ids的总长度不能超过MAX_SEQ_LEN
-        while True:
+        for _ in range(MAX_BATCH_SIZE):
             try:
                 request_item = await asyncio.wait_for(request_queue.get(), timeout=0.1)  # Non-blocking get with timeout
                 sum_len = sum(len(request_item["input_ids"][0]) for request_item in batch)
@@ -194,7 +194,7 @@ async def process_request_queue():
                 request_item["input_ids"] = new_input_ids[i]
                 request_item["state"] = [
                                             [
-                                                states[j][k][i:i+1] 
+                                                states[j][k][i:i+1].to('cpu') # move state back to cpu, to avoid CUDA OOM
                                             for k in range(3)] 
                                         for j in range(model.args.n_layer)]
                 request_item["token_count"] = request_item.get("token_count", 0) + 1
@@ -222,15 +222,8 @@ def prepare_batch(batch: List[Dict]):
     input_ids = [request_item["input_ids"] for request_item in batch]
     request_contexts = [{"request": request_item["request"], "token_count": request_item.get("token_count", 0)} for request_item in batch]
     sampling_params_list = [create_sampling_params(request_item["request"]) for request_item in batch]
-    states = [
-                [
-                    torch.cat([
-                        request_item['state'][j][k]
-                        for request_item in batch],
-                        dim=0,
-                    )
-                 for k in range(3)]
-             for j in range(model.args.n_layer)]
+    states = [model.move_state(request_item.get("state", model.empty_state(1))) for request_item in batch] # move states from cpu to gpu
+    states = [[torch.cat([state[j][k] for state in states], dim=0) for k in range(3)] for j in range(model.args.n_layer)]
     return input_ids, request_contexts, sampling_params_list, states
 
 def create_sampling_params(request: ChatCompletionRequest) -> SamplingParams:
@@ -368,7 +361,6 @@ async def chat_completions(request: ChatCompletionRequest, fastapi_request: Requ
                             "input_ids": input_ids, 
                             "next_input_ids": None, # 用于分chunk处理
                             "stream_queue": stream_queue, 
-                            "state": model.empty_state(1)
                         }
         request_queue.put_nowait(request_item)
 
@@ -378,19 +370,18 @@ async def chat_completions(request: ChatCompletionRequest, fastapi_request: Requ
                     completion = await stream_queue.get()
                     if completion is None:
                         break
-                    yield json.dumps({
-                        "id": "cmpl-" + str(time.time()),
-                        "object": "chat.completion.chunk",
-                        "created": int(time.time()),
-                        "model": request.model,
-                        "choices": [
-                            {
-                                "delta": {"content": completion},
-                                "index": 0,
-                                "finish_reason": None,
-                            }
-                        ],
-                        }).encode('utf-8')
+                    data = json.dumps({
+                        'id': 'cmpl-' + str(time.time()),
+                        'object': 'chat.completion.chunk',
+                        'created': int(time.time()),
+                        'model': request.model,
+                        'choices': [{
+                            'delta': {'content': completion},
+                            'index': 0,
+                            'finish_reason': None,
+                        }],
+                    })
+                    yield (f"data: {data}\n\n").encode('utf-8')
                 except asyncio.CancelledError:
                     break
         else:
@@ -421,5 +412,14 @@ async def chat_completions(request: ChatCompletionRequest, fastapi_request: Requ
 
 if __name__ == "__main__":
     import uvicorn
-
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    from argparse import ArgumentParser
+    parser = ArgumentParser()
+    parser.add_argument("--port", type=int, default=8000, help="Port to run the server on")
+    parser.add_argument("--device", type=str, default="cuda", help="Device to run the model on")
+    parser.add_argument("--max_seq_len", type=int, default=1048576, help="Max sequence length for input_ids")
+    parser.add_argument("--max_batch_size", type=int, default=128, help="Max batch size for inference, to avoid OOM")
+    args = parser.parse_args()
+    torch.cuda.set_device(args.device)
+    MAX_SEQ_LEN = args.max_seq_len
+    MAX_BATCH_SIZE = args.max_batch_size
+    uvicorn.run(app, host="0.0.0.0", port=args.port, log_level="info")
