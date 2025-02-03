@@ -28,9 +28,9 @@ async def lifespan(app: FastAPI):
     # TODO: 还有能不能优雅点编译kernel
     with torch.no_grad():
         state = model.empty_state(1)
-        for T in [16, 32, 64]:
+        for T in [1, 16, 32, 64]:
             input_ids = torch.zeros((1, T), dtype=torch.int32, device=device)
-            model.forward([input_ids], state)
+            model.forward([input_ids], [state])
     background_task = asyncio.create_task(process_request_queue())
     yield
     if background_task:
@@ -159,7 +159,7 @@ async def process_request_queue():
         # 2. Inference Step (Continuous Batching)
         try:
             with torch.no_grad():
-                logits = model(input_ids, state=states)
+                logits, states = model(input_ids, state=states)
         except Exception as e:
             # Handle model inference errors.  Important to catch and log.
             print(f"Inference error: {e}")
@@ -181,22 +181,14 @@ async def process_request_queue():
                 # chunk处理，仍然处于prefill阶段
                 request_item["input_ids"] = request_item["next_input_ids"]
                 request_item["next_input_ids"] = None
-                request_item["state"] = [
-                                            [
-                                                states[j][k][i:i+1] 
-                                            for k in range(3)] 
-                                        for j in range(model.args.n_layer)]
+                request_item["state"] = model.move_state(states[i], device='cpu')
                 request_queue.put_nowait(request_item)
             else:
                 # Stream and re-enqueue
                 request_item["stream_queue"].put_nowait(completions[i])
                 # Update input_ids and re-enqueue
                 request_item["input_ids"] = new_input_ids[i]
-                request_item["state"] = [
-                                            [
-                                                states[j][k][i:i+1].to('cpu') # move state back to cpu, to avoid CUDA OOM
-                                            for k in range(3)] 
-                                        for j in range(model.args.n_layer)]
+                request_item["state"] = model.move_state(states[i], device='cpu')
                 request_item["token_count"] = request_item.get("token_count", 0) + 1
                 request_queue.put_nowait(request_item)
 
@@ -223,7 +215,6 @@ def prepare_batch(batch: List[Dict]):
     request_contexts = [{"request": request_item["request"], "token_count": request_item.get("token_count", 0)} for request_item in batch]
     sampling_params_list = [create_sampling_params(request_item["request"]) for request_item in batch]
     states = [model.move_state(request_item.get("state", model.empty_state(1))) for request_item in batch] # move states from cpu to gpu
-    states = [[torch.cat([state[j][k] for state in states], dim=0) for k in range(3)] for j in range(model.args.n_layer)]
     return input_ids, request_contexts, sampling_params_list, states
 
 def create_sampling_params(request: ChatCompletionRequest) -> SamplingParams:
@@ -415,7 +406,7 @@ if __name__ == "__main__":
     from argparse import ArgumentParser
     parser = ArgumentParser()
     parser.add_argument("--port", type=int, default=8000, help="Port to run the server on")
-    parser.add_argument("--device", type=str, default="cuda", help="Device to run the model on")
+    parser.add_argument("--device", type=str, default="cuda:0", help="Device to run the model on")
     parser.add_argument("--max_seq_len", type=int, default=1048576, help="Max sequence length for input_ids")
     parser.add_argument("--max_batch_size", type=int, default=128, help="Max batch size for inference, to avoid OOM")
     args = parser.parse_args()
