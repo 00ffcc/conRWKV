@@ -15,7 +15,7 @@ torch.backends.cuda.matmul.allow_tf32 = True
 # torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
 # torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = True
 torch._C._jit_set_autocast_mode(False)
-
+import time
 
 # DTYPE = torch.bfloat16
 DTYPE = torch.half # better
@@ -75,7 +75,7 @@ class RWKV_Tmix_x070(torch.nn.Module):
     def forward(self, 
                 x: torch.Tensor, 
                 v_first: torch.Tensor, 
-                state: List[List[torch.Tensor]],
+                state: torch.Tensor,
                 cu_seqlens: torch.LongTensor
                 ):
         B, T, C = x.shape
@@ -85,11 +85,11 @@ class RWKV_Tmix_x070(torch.nn.Module):
         xx = torch.cat([torch.empty(1, 1, C, device=x.device, dtype=x.dtype), x[:, :-1, :]], dim=1)
         
         N_prefill = cu_seqlens.shape[-1] - 1
-        xx[0, cu_seqlens[:-1], :] = state[self.layer_id][0][:N_prefill]
-        xx[0, cu_seqlens[-1]:, :] = state[self.layer_id][0][N_prefill:]
+        xx[0, cu_seqlens[:-1], :] = state[self.layer_id, :N_prefill, :, 0]
+        xx[0, cu_seqlens[-1]:, :] = state[self.layer_id, N_prefill:, :, 0]
 
-        state[self.layer_id][0][:N_prefill] = x[0, cu_seqlens[1:]-1, :]
-        state[self.layer_id][0][N_prefill:] = x[0, cu_seqlens[-1]:, :]
+        state[self.layer_id, :N_prefill, :, 0] = x[0, cu_seqlens[1:]-1, :]
+        state[self.layer_id, N_prefill:, :, 0] = x[0, cu_seqlens[-1]:, :]
 
         xx = xx - x
 
@@ -134,7 +134,8 @@ class RWKV_Tmix_x070(torch.nn.Module):
             kk_ = kk[:, :cu_seqlens[-1], :, :]
             a_  =  a[:, :cu_seqlens[-1], :, :]
 
-            x1, state[self.layer_id][1][:N_prefill] = chunk_rwkv7(
+            recurrent_state = state[self.layer_id, :N_prefill, :, 1:-1].reshape(-1, H, N, N)
+            x1, recurrent_state = chunk_rwkv7(
                 r=r_,
                 log_w=w_,
                 k=k_,
@@ -142,11 +143,12 @@ class RWKV_Tmix_x070(torch.nn.Module):
                 a=-kk_,
                 b=kk_ * a_,
                 scale=1.,
-                initial_state=state[self.layer_id][1][:N_prefill],
+                initial_state=recurrent_state,
                 output_final_state=True,
                 cu_seqlens=cu_seqlens,
                 head_first=False
             )
+            state[self.layer_id, :N_prefill, :, 1:-1] = recurrent_state.reshape(-1, H*N, N)
         else:
             x1 = torch.empty(B, 0, H, N, device=x.device, dtype=x.dtype)
             
@@ -159,7 +161,8 @@ class RWKV_Tmix_x070(torch.nn.Module):
             kk_ = kk[:, cu_seqlens[-1]:, :, :].view(-1, 1, H, N)
             a_  =  a[:, cu_seqlens[-1]:, :, :].view(-1, 1, H, N)
             
-            x2, state[self.layer_id][1][N_prefill:] = fused_recurrent_rwkv7(
+            recurrent_state = state[self.layer_id, N_prefill:, :, 1:-1].reshape(-1, H, N, N)
+            x2, recurrent_state = fused_recurrent_rwkv7(
                 r=r_,
                 log_w=w_,
                 k=k_,
@@ -167,11 +170,12 @@ class RWKV_Tmix_x070(torch.nn.Module):
                 a=-kk_,
                 b=kk_ * a_,
                 scale=1.,
-                initial_state=state[self.layer_id][1][N_prefill:],
+                initial_state=recurrent_state,
                 output_final_state=True,
                 cu_seqlens=None,
                 head_first=False
             )
+            state[self.layer_id, N_prefill:, :, 1:-1] = recurrent_state.reshape(-1, H*N, N)
             x2 = x2.view(B, T-cu_seqlens[-1], H, N)
         else:
             x2 = torch.empty(B, 0, H, N, device=x.device, dtype=x.dtype)
@@ -208,18 +212,18 @@ class RWKV_CMix_x070(torch.nn.Module):
 
     def forward(self, 
                 x: torch.Tensor, 
-                state: List[List[torch.Tensor]], 
+                state: torch.Tensor, 
                 cu_seqlens: torch.LongTensor
                 ):
         B, T, C = x.shape
 
         xx = torch.cat([torch.empty(1, 1, C, device=x.device, dtype=x.dtype), x[:, :-1, :]], dim=1)
         N_prefill = cu_seqlens.shape[-1] - 1
-        xx[0, cu_seqlens[:-1], :] = state[self.layer_id][2][:N_prefill]
-        xx[0, cu_seqlens[-1]:, :] = state[self.layer_id][2][N_prefill:]
+        xx[0, cu_seqlens[:-1], :] = state[self.layer_id, :N_prefill, :, -1]
+        xx[0, cu_seqlens[-1]:, :] = state[self.layer_id, N_prefill:, :, -1]
 
-        state[self.layer_id][2][:N_prefill] = x[0, cu_seqlens[1:]-1, :]
-        state[self.layer_id][2][N_prefill:] = x[0, cu_seqlens[-1]:, :]
+        state[self.layer_id, :N_prefill, :, -1] = x[0, cu_seqlens[1:]-1, :]
+        state[self.layer_id, N_prefill:, :, -1] = x[0, cu_seqlens[-1]:, :]
 
         xx = xx - x
         
@@ -244,7 +248,7 @@ class Block(torch.nn.Module):
         self.att = RWKV_Tmix_x070(args, layer_id)
         self.ffn = RWKV_CMix_x070(args, layer_id)
         
-    def forward(self, x, v_first, state:List[List[torch.Tensor]], cu_seqlens):
+    def forward(self, x, v_first, state: torch.Tensor, cu_seqlens):
 
         xx, v_first = self.att(self.ln1(x), v_first, state, cu_seqlens)
         x = x + xx
@@ -291,7 +295,7 @@ class RWKV(nn.Module):
 
     def forward(self, 
                 idx: Union[torch.LongTensor, List[torch.LongTensor]], 
-                state: List[List[List[torch.Tensor]]], 
+                state: torch.Tensor, 
                 ):
         '''
         cu_seqlens (torch.LongTensor):
@@ -303,16 +307,18 @@ class RWKV(nn.Module):
 
         assert isinstance(idx, list), f"idx must be a list of LongTensors"
         # sort idx by length in descending order
-        idx, state, index = zip(*sorted(zip(idx, state, range(len(idx))), key=lambda x: x[0].shape[-1], reverse=True))
+        idx, index = zip(*sorted(zip(idx, range(len(idx))), key=lambda x: x[0].shape[-1], reverse=True))
+        index = torch.LongTensor(index).to(self.device)
         cu_seqlens = torch.cat([torch.LongTensor([0]), torch.cumsum(torch.LongTensor([i.shape[-1] for i in idx if i.shape[-1]>1]), dim=0)], dim=0).to(self.device)
 
         idx = torch.cat(idx, dim=-1)
-        state = [[torch.cat([state[j][k] for state in state], dim=0) for k in range(3)] for j in range(self.args.n_layer)]
+        state = state[:, index, :, :]
 
-        reverse_index = [index.index(i) for i in range(len(index))]
+        reverse_index = torch.argsort(index)
 
         assert idx.shape[0] == 1, "batch size must be 1"
-        assert state[0][0].shape[0] == (cu_seqlens.shape[0] - 1) + (idx.shape[-1] - cu_seqlens[-1]), f"state shape error {state[0][0].shape[0]} {cu_seqlens.shape[0]-1} {idx.shape[-1] - cu_seqlens[-1]}"
+        assert state.shape[1] == (cu_seqlens.shape[0] - 1) + (idx.shape[-1] - cu_seqlens[-1]), f"state shape error {state.shape[1]} {cu_seqlens.shape[0]-1} {idx.shape[-1] - cu_seqlens[-1]}"
+        print(f"{time.time():.2f} prefill: {cu_seqlens.shape[0] - 1} batches, {cu_seqlens[-1]} tokens; decoding: {idx.shape[-1] - cu_seqlens[-1]} tokens")
 
         x = self.emb(idx)
         x = self.ln0(x)
@@ -323,27 +329,16 @@ class RWKV(nn.Module):
 
         x = self.ln_out(x)
         x = self.head(x)
-
-        state = [[[state[j][k][i:i+1] for k in range(3)] for j in range(self.args.n_layer)] for i in reverse_index]
         
         x = torch.cat([x[0, cu_seqlens[1:]-1], x[0, cu_seqlens[-1]:]], dim=0)
-        x = torch.stack([x[i] for i in reverse_index], dim=0)
+        x = x[reverse_index]
+        state = state[:, reverse_index]
         
         return x, state
     def empty_state(self, batch_size=1, device=None):
         if device is None:
             device = self.device
-        return [
-                [
-                    torch.zeros(batch_size, self.args.n_embd, dtype=DTYPE, device=device),
-                    torch.zeros(batch_size, self.args.n_embd // self.args.head_size, self.args.head_size, self.args.head_size, dtype=torch.float32, device=device),
-                    torch.zeros(batch_size, self.args.n_embd, dtype=DTYPE, device=device),
-                ] 
-                for _ in range(self.args.n_layer)]
-    def move_state(self, state, device=None):
-        if device is None:
-            device = self.device
-        return [[s.to(device) for s in layer] for layer in state]
+        return torch.zeros(self.args.n_layer, batch_size, self.args.n_embd, self.args.head_size+2, dtype=DTYPE, device=device)
 
 ########################################################################################################
 # RWKV Inference
@@ -366,7 +361,7 @@ if __name__ == '__main__':
         prompt = "The Eiffel tower is in the city of"
         input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to('cuda')
         print(f'\nInput:\n{input_ids}')
-        state = [model.empty_state(1) for _ in range(3)]
+        state = model.empty_state(3)
         outs, state = model.forward([input_ids[:, :4], input_ids[:, :6], input_ids[:, :5]], state)
         outs, state = model.forward([input_ids[:, 4:-1], input_ids[:, 6:-1], input_ids[:, 5:-1]], state)
         outs, state = model.forward([input_ids[:, -1:], input_ids[:, -1:], input_ids[:, -1:]], state)
@@ -387,15 +382,3 @@ if __name__ == '__main__':
                 token = tokenizer.decode([token_id])
                 token_prob = probs[token_id].item()
                 print(token, f'[probability {token_prob:.2%}]')
-
-
-        # input_ids = torch.zeros((1, 1024), dtype=torch.long, device='cuda')
-        # state = model.empty_state(1)
-        # import time
-        # start_time = time.time()
-        # model.forward([input_ids[:, :200]], state)
-        # print(f"Time elapsed: {time.time() - start_time:.2f}s")
-        # model.forward([input_ids[:, :800]], state)
-        # print(f"Time elapsed: {time.time() - start_time:.2f}s")
-        # # model.forward([input_ids[:, :500]], state)
-        # # print(f"Time elapsed: {time.time() - start_time:.2f}s")
