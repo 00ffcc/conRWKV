@@ -128,7 +128,7 @@ def load_model():
     global model, tokenizer, device
     device = args.device
     tokenizer=RWKVWorldTokenizer(vocab_file=r"./tokenizer/rwkv_vocab_v20230424.txt")
-    model = RWKV.from_pretrained(r"./weights/v7-0.1b.pth", device=device)
+    model = RWKV.from_pretrained(args.model, device=device)
     model.eval()
     
 
@@ -173,7 +173,7 @@ async def process_request_queue():
         new_input_ids, completions, finished_requests = sample_and_postprocess(logits, input_ids, request_contexts, sampling_params_list)
         print(f"{time.time():.2f} sampling done")  
         # 4. Handle Streaming and Re-enqueue unfinished requests
-        states = states.to('cpu')
+        # states = states.to('cpu') TODO: state offload to cpu, offload的话很慢，不offload的话会爆显存
         print(f"{time.time():.2f} moving states to cpu done")
         for i, request_item in enumerate(batch):
             if i in finished_requests:
@@ -337,11 +337,14 @@ def sample(logits: torch.Tensor, input_ids: torch.Tensor, request_context: Dict,
 
 # API Endpoint
 @app.post("/v1/chat/completions")
+@app.post("/v1/completions")
 async def chat_completions(request: ChatCompletionRequest, fastapi_request: Request):
     if request.messages:
         # Prepare the prompt
+        chat_mode = True
         prompt = tokenizer.apply_chat_template(request.messages, tokenize=False, add_generation_prompt=True)
     else:
+        chat_mode = False
         prompt = request.prompt
     # Tokenize the input
     input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
@@ -364,17 +367,25 @@ async def chat_completions(request: ChatCompletionRequest, fastapi_request: Requ
                 try:
                     completion = await stream_queue.get()
                     if completion is None:
+                        yield "data: [DONE]".encode('utf-8')
                         break
                     data = json.dumps({
                         'id': 'cmpl-' + str(time.time()),
-                        'object': 'chat.completion.chunk',
+                        'object': 'chat.completion.chunk' if chat_mode else 'text_completion',
                         'created': int(time.time()),
                         'model': request.model,
-                        'choices': [{
-                            'delta': {'content': completion},
-                            'index': 0,
-                            'finish_reason': None,
-                        }],
+                        'choices': [(
+                            {
+                                'delta': {'content': completion},
+                                'index': 0,
+                                'finish_reason': None,
+                            } if chat_mode else
+                            {
+                                'text': completion,
+                                'index': 0,
+                                'finish_reason': None,
+                            }
+                        )],
                     })
                     yield (f"data: {data}\n\n").encode('utf-8')
                 except asyncio.CancelledError:
@@ -390,17 +401,22 @@ async def chat_completions(request: ChatCompletionRequest, fastapi_request: Requ
                 except asyncio.CancelledError:
                     break
             yield json.dumps({
-                "id": "cmpl-" + str(time.time()),
-                "object": "chat.completion",
-                "created": int(time.time()),
-                "model": request.model,
-                "choices": [
-                    {
-                        "delta": {"role": "assistant", "content": final_completion},
-                        "index": 0,
-                        "finish_reason": "stop",
-                    }
-                ],
+                'id': 'cmpl-' + str(time.time()),
+                'object': 'chat.completion.chunk' if chat_mode else 'text_completion',
+                'created': int(time.time()),
+                'model': request.model,
+                'choices': [(
+                            {
+                                'delta': {'role': 'assistant', 'content': final_completion},
+                                'index': 0,
+                                'finish_reason': None,
+                            } if chat_mode else
+                            {
+                                'text': final_completion,
+                                'index': 0,
+                                'finish_reason': None,
+                            }
+                        )],
                 }).encode('utf-8')
 
     return StreamingResponse(stream_generator(), media_type="text/event-stream")
@@ -413,6 +429,7 @@ if __name__ == "__main__":
     parser.add_argument("--device", type=str, default="cuda:0", help="Device to run the model on")
     parser.add_argument("--max_seq_len", type=int, default=1048576, help="Max sequence length for input_ids")
     parser.add_argument("--max_batch_size", type=int, default=128, help="Max batch size for inference, to avoid OOM")
+    parser.add_argument("--model", type=str, default=r"./weights/v7-1.5b.pth", help="path to model weights")
     args = parser.parse_args()
     torch.cuda.set_device(args.device)
     MAX_SEQ_LEN = args.max_seq_len
