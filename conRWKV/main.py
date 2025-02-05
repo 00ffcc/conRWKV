@@ -52,12 +52,6 @@ app = FastAPI(title="LLM Backend with Continuous Batching",
                 lifespan=lifespan,
                 )
 
-
-# Model Configuration (Move to a config file for production)
-
-
-# MAX_BATCH_SIZE = 32  # Maximum number of requests in a batch
-
 # Request Data Model (OpenAI API format)
 class ChatCompletionRequest(BaseModel):
     model: str
@@ -122,12 +116,15 @@ tokenizer = None
 request_queue = asyncio.Queue()
 background_task = None
 device = None
-from models.v7.model_fla import RWKV
-from tokenizer.tokenization_rwkv_world import RWKVWorldTokenizer
+args = None
+from conRWKV.models.v7.model_fla import RWKV
+from conRWKV.tokenizer.tokenization_rwkv_world import RWKVWorldTokenizer
 def load_model():
     global model, tokenizer, device
     device = args.device
-    tokenizer=RWKVWorldTokenizer(vocab_file=r"./tokenizer/rwkv_vocab_v20230424.txt")
+    import os
+    dir_path = os.path.dirname(os.path.abspath(__file__))
+    tokenizer=RWKVWorldTokenizer(vocab_file=rf"{dir_path}/tokenizer/rwkv_vocab_v20230424.txt")
     model = RWKV.from_pretrained(args.model, device=device)
     model.eval()
     
@@ -137,16 +134,16 @@ async def process_request_queue():
     while True:
         print(f"{time.time():.2f} waiting for requests...")
         batch = []
-        # input_ids的总长度不能超过MAX_SEQ_LEN
-        for _ in range(MAX_BATCH_SIZE):
+        # input_ids的总长度不能超过args.max_seq_len
+        for _ in range(args.max_batch_size):
             try:
                 request_item = await asyncio.wait_for(request_queue.get(), timeout=0.01)  # Non-blocking get with timeout
                 sum_len = sum(len(request_item["input_ids"][0]) for request_item in batch)
-                if sum_len + len(request_item["input_ids"][0]) > MAX_SEQ_LEN:
-                    request_item["next_input_ids"] = request_item["input_ids"][:, MAX_SEQ_LEN-sum_len:]
-                    request_item["input_ids"] = request_item["input_ids"][:, :MAX_SEQ_LEN-sum_len]
+                if sum_len + len(request_item["input_ids"][0]) > args.max_seq_len:
+                    request_item["next_input_ids"] = request_item["input_ids"][:, args.max_seq_len-sum_len:]
+                    request_item["input_ids"] = request_item["input_ids"][:, :args.max_seq_len-sum_len]
                 batch.append(request_item)
-                if sum_len + len(request_item["input_ids"][0]) == MAX_SEQ_LEN:
+                if sum_len + len(request_item["input_ids"][0]) == args.max_seq_len:
                     break
             except asyncio.TimeoutError:
                 break  # No more requests in the queue
@@ -421,7 +418,8 @@ async def chat_completions(request: ChatCompletionRequest, fastapi_request: Requ
 
     return StreamingResponse(stream_generator(), media_type="text/event-stream")
 
-if __name__ == "__main__":
+def main():
+    global args
     import uvicorn
     from argparse import ArgumentParser
     parser = ArgumentParser()
@@ -432,6 +430,6 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, default=r"./weights/v7-1.5b.pth", help="path to model weights")
     args = parser.parse_args()
     torch.cuda.set_device(args.device)
-    MAX_SEQ_LEN = args.max_seq_len
-    MAX_BATCH_SIZE = args.max_batch_size
     uvicorn.run(app, host="0.0.0.0", port=args.port, log_level="info")
+if __name__ == "__main__":
+    main()
