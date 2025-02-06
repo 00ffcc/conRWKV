@@ -2,6 +2,7 @@
 
 <div align="center">
     本项目旨在提供一个高并发的RWKV云端推理引擎，以方便后续基于RWKV的应用。
+</div>
 
 ### feature
 
