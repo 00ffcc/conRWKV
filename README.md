@@ -15,11 +15,11 @@
 ### install & deploy
 
 ```bash
-pip install git+https://github.com/00ffcc/conRWKV
+pip install git+https://github.com/00ffcc/conRWKV.git@master
 conRWKV --model /path/to/pth
 ```
 
-**注意：**为了防止triton在处理变长数据时反复重新编译kernel，conRWKV中使用的[fla](https://github.com/00ffcc/flash-linear-attention)与[官方版本](https://github.com/fla-org/flash-linear-attention/)略有不同，安装前需要删除原有的fla或新开一个虚拟环境。
+**注意：** 为了防止triton在处理变长数据时反复重新编译kernel，conRWKV中使用的[fla](https://github.com/00ffcc/flash-linear-attention)与[官方版本](https://github.com/fla-org/flash-linear-attention/)略有不同，安装前需要删除原有的fla或新开一个虚拟环境。
 
 ### benchmark
 
