@@ -23,7 +23,7 @@ conRWKV --model /path/to/pth
 
 ### benchmark
 
-这里展示了与[RWKV-Runner](https://github.com/josStorer/RWKV-Runner)的比较。由于服务器上没有vulkan环境，暂时无法测试[Ai00](https://github.com/Ai00-X/ai00_server)，有测试的方法请戳我。
+这里展示了与[RWKV-Runner](https://github.com/josStorer/RWKV-Runner)的比较。由于服务器上没有vulkan环境，暂时无法测试[Ai00](https://github.com/Ai00-X/ai00_server)；由于[RWKV-Infer](https://github.com/OpenMOSE/RWKV-Infer)不支持文本补全，也暂时无法测试。有测试的方法请戳我。
 
 | RPS  | Num prompts | Engine      | Successful requests | Median E2E Latency | Median TTFT | Median ITL |
 | ---- | ----------- | ----------- | ------------------- | ------------------ | ----------- | ---------- |
