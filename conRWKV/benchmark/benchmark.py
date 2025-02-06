@@ -183,7 +183,7 @@ async def async_request_openai_completions(
                             # NOTE: Some completion API might have a last
                             # usage summary response without a token so we
                             # want to check a token was generated
-                            if data['choices'][0]['delta']['content']:
+                            if data['choices'][0]['text']:
                                 timestamp = time.perf_counter()
                                 # First token
                                 if ttft == 0.0:
@@ -195,7 +195,7 @@ async def async_request_openai_completions(
                                     output.itl.append(timestamp - most_recent_timestamp)
 
                                 most_recent_timestamp = timestamp
-                                generated_text += data['choices'][0]['delta']['content']
+                                generated_text += data['choices'][0]['text']
 
                     output.generated_text = generated_text
                     output.success = True
@@ -329,7 +329,9 @@ ASYNC_REQUEST_FUNCS = {
     'lmdeploy': async_request_openai_completions,
     'trt': async_request_trt_llm,
     'gserver': async_request_gserver,
-    'continuousRWKV': async_request_openai_completions,
+    'conRWKV': async_request_openai_completions,
+    'RWKV-Runner': async_request_openai_completions,
+    'RWKV-Infer': async_request_openai_completions,
 }
 
 
@@ -804,19 +806,18 @@ def run_benchmark(args_: argparse.Namespace):
             'vllm': 8000,
             'trt': 8000,
             'gserver': 9988,
-            'continuousRWKV': 8000,
+            'conRWKV': 8000,
+            'RWKV-Runner': 8000,
+            'RWKV-Infer': 9000,
         }.get(args.backend, 30000)
 
     model_url = (f'{args.base_url}/v1/models' if args.base_url else f'http://{args.host}:{args.port}/v1/models')
 
     if args.backend in ['sglang', 'sglang-native']:
         api_url = (f'{args.base_url}/generate' if args.base_url else f'http://{args.host}:{args.port}/generate')
-    elif args.backend in ['sglang-oai', 'vllm', 'lmdeploy']:
+    elif args.backend in ['sglang-oai', 'vllm', 'lmdeploy', 'RWKV-Runner', 'conRWKV', 'RWKV-Infer']:
         api_url = (f'{args.base_url}/v1/completions'
                    if args.base_url else f'http://{args.host}:{args.port}/v1/completions')
-    elif args.backend in ['continuousRWKV']:
-        api_url = (f'{args.base_url}/v1/chat/completions'
-                   if args.base_url else f'http://{args.host}:{args.port}/v1/chat/completions')
     elif args.backend == 'trt':
         api_url = (
             f'{args.base_url}/v2/models/ensemble/generate_stream'
@@ -933,7 +934,7 @@ if __name__ == '__main__':
         '--backend',
         type=str,
         choices=list(ASYNC_REQUEST_FUNCS.keys()),
-        default='continuousRWKV',
+        default='conRWKV',
         help='Must specify a backend, depending on the LLM Inference Engine.',
     )
     parser.add_argument(
