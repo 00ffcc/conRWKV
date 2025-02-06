@@ -15,15 +15,15 @@
 ### install & deploy
 
 ```bash
-pip install git+https://github.com/00ffcc/conRWKV
+pip install git+https://github.com/00ffcc/conRWKV.git@master
 conRWKV --model /path/to/pth
 ```
 
-**注意：**为了防止triton在处理变长数据时反复重新编译kernel，conRWKV中使用的[fla](https://github.com/00ffcc/flash-linear-attention)与[官方版本](https://github.com/fla-org/flash-linear-attention/)略有不同，安装前需要删除原有的fla或新开一个虚拟环境。
+**注意：** 为了防止triton在处理变长数据时反复重新编译kernel，conRWKV中使用的[fla](https://github.com/00ffcc/flash-linear-attention)与[官方版本](https://github.com/fla-org/flash-linear-attention/)略有不同，安装前需要删除原有的fla或新开一个虚拟环境。
 
 ### benchmark
 
-这里展示了与[RWKV-Runner](https://github.com/josStorer/RWKV-Runner)的比较。由于服务器上没有vulkan环境，暂时无法测试[Ai00](https://github.com/Ai00-X/ai00_server)，有测试的方法请戳我。
+这里展示了与[RWKV-Runner](https://github.com/josStorer/RWKV-Runner)的比较。由于服务器上没有vulkan环境，暂时无法测试[Ai00](https://github.com/Ai00-X/ai00_server)；由于[RWKV-Infer](https://github.com/OpenMOSE/RWKV-Infer)不支持文本补全，也暂时无法测试。有测试的方法请戳我。
 
 | RPS  | Num prompts | Engine      | Successful requests | Median E2E Latency | Median TTFT | Median ITL |
 | ---- | ----------- | ----------- | ------------------- | ------------------ | ----------- | ---------- |
