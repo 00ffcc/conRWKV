@@ -314,10 +314,10 @@ def get_model(pretrained_model_name_or_path: str) -> str:
 
 
 def get_tokenizer(pretrained_model_name_or_path: str, ) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
-    import sys
-    sys.path.append(r"..")
-    from tokenizer.tokenization_rwkv_world import RWKVWorldTokenizer
-    tokenizer=RWKVWorldTokenizer(vocab_file=r"../tokenizer/rwkv_vocab_v20230424.txt")
+    from conRWKV.tokenizer.tokenization_rwkv_world import RWKVWorldTokenizer
+    import os
+    dir_path = os.path.dirname(os.path.abspath(__file__))
+    tokenizer=RWKVWorldTokenizer(vocab_file=rf"{dir_path}/../tokenizer/rwkv_vocab_v20230424.txt")
     return tokenizer
 
 
