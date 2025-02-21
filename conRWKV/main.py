@@ -132,68 +132,80 @@ def load_model():
 # Background task for processing requests from the queue
 async def process_request_queue():
     while True:
-        print(f"{time.time():.2f} waiting for requests...")
-        batch = []
-        # input_ids的总长度不能超过args.max_seq_len
-        for _ in range(args.max_batch_size):
-            try:
-                request_item = await asyncio.wait_for(request_queue.get(), timeout=0.01)  # Non-blocking get with timeout
-                sum_len = sum(len(request_item["input_ids"][0]) for request_item in batch)
-                if sum_len + len(request_item["input_ids"][0]) > args.max_seq_len:
-                    request_item["next_input_ids"] = request_item["input_ids"][:, args.max_seq_len-sum_len:]
-                    request_item["input_ids"] = request_item["input_ids"][:, :args.max_seq_len-sum_len]
-                batch.append(request_item)
-                if sum_len + len(request_item["input_ids"][0]) == args.max_seq_len:
-                    break
-            except asyncio.TimeoutError:
-                break  # No more requests in the queue
-
-        if not batch:
-            await asyncio.sleep(0.03)  # Avoid busy-waiting if the queue is empty
-            continue
-        print(f"{time.time():.2f} processing batch of {len(batch)} requests...")
-        # 1. Prepare the batch
-        input_ids, request_contexts, sampling_params_list, states = prepare_batch(batch)
-        print(f"{time.time():.2f} batch prepared")
-        # 2. Inference Step (Continuous Batching)
         try:
-            with torch.no_grad():
-                logits, states = model(input_ids, state=states)     
-        except Exception as e:
-            # Handle model inference errors.  Important to catch and log.
-            print(f"Inference error: {e}")
-            for request_item in batch:
-                request_item["exception"] = e
-            continue
-        print(f"{time.time():.2f} inference done")  
-        # 3. Sampling Step (Token Generation) and Post-processing
-        new_input_ids, completions, finished_requests = sample_and_postprocess(logits, input_ids, request_contexts, sampling_params_list)
-        print(f"{time.time():.2f} sampling done")  
-        # 4. Handle Streaming and Re-enqueue unfinished requests
-        # states = states.to('cpu') TODO: state offload to cpu, offload的话很慢，不offload的话会爆显存
-        print(f"{time.time():.2f} moving states to cpu done")
-        for i, request_item in enumerate(batch):
-            if i in finished_requests:
-                # Complete request
-                # put final result and None(end marker)
-                request_item["stream_queue"].put_nowait(completions[i])
-                request_item["stream_queue"].put_nowait(None)
-            elif request_item["next_input_ids"] is not None:
-                # chunk处理，仍然处于prefill阶段
-                request_item["input_ids"] = request_item["next_input_ids"]
-                request_item["next_input_ids"] = None
-                request_item["state"] = states[:, i:i+1]
-                request_queue.put_nowait(request_item)
-            else:
-                # Stream and re-enqueue
-                request_item["stream_queue"].put_nowait(completions[i])
-                # Update input_ids and re-enqueue
-                request_item["input_ids"] = new_input_ids[i]
-                request_item["state"] = states[:, i:i+1]
-                request_item["token_count"] = request_item.get("token_count", 0) + 1
-                request_queue.put_nowait(request_item)
-        print(f"{time.time():.2f} requests processed")
+            # print(f"{time.time():.2f} waiting for requests...")
+            batch = []
+            # input_ids的总长度不能超过args.max_seq_len
+            for _ in range(args.max_batch_size):
+                try:
+                    request_item = await asyncio.wait_for(request_queue.get(), timeout=0.01)  # Non-blocking get with timeout
+                    sum_len = sum(len(request_item["input_ids"][0]) for request_item in batch)
+                    if sum_len + len(request_item["input_ids"][0]) > args.max_seq_len:
+                        request_item["next_input_ids"] = request_item["input_ids"][:, args.max_seq_len-sum_len:]
+                        request_item["input_ids"] = request_item["input_ids"][:, :args.max_seq_len-sum_len]
+                    batch.append(request_item)
+                    if sum_len + len(request_item["input_ids"][0]) == args.max_seq_len:
+                        break
+                except asyncio.TimeoutError:
+                    break  # No more requests in the queue
 
+            if not batch:
+                await asyncio.sleep(0.03)  # Avoid busy-waiting if the queue is empty
+                continue
+            print(f"{time.time():.2f} processing batch of {len(batch)} requests...")
+            
+            # 1. Prepare the batch
+            input_ids, sampling_params_list, states = prepare_batch(batch)
+            print(f"{time.time():.2f} batch prepared")
+            
+            # 2. Inference Step (Continuous Batching)
+            try:
+                with torch.no_grad():
+                    logits, states = model(input_ids, state=states)     
+            except Exception as e:
+                # Handle model inference errors.  Important to catch and log.
+                print(f"Inference error: {e}")
+                for request_item in batch:
+                    request_item["exception"] = e
+                continue
+            print(f"{time.time():.2f} inference done")  
+
+
+            # 3. Sampling Step (Token Generation) and Post-processing
+            
+            for i, request_item in enumerate(batch):
+                request_item['all_ids'] = torch.cat([request_item['all_ids'], request_item['input_ids']], dim=1)
+            new_input_ids, completions, finished_requests = sample_and_postprocess(logits, batch, sampling_params_list)
+            print(f"{time.time():.2f} sampling done")  
+            
+            
+            # 4. Handle Streaming and Re-enqueue unfinished requests
+            # states = states.to('cpu') TODO: state offload to cpu, offload的话很慢，不offload的话会爆显存
+            print(f"{time.time():.2f} moving states to cpu done")
+            for i, request_item in enumerate(batch):
+                if i in finished_requests:
+                    # Complete request
+                    # put final result and None(end marker)
+                    request_item["stream_queue"].put_nowait(completions[i])
+                    request_item["stream_queue"].put_nowait(None)
+                elif request_item["next_input_ids"] is not None:
+                    # chunk处理，仍然处于prefill阶段
+                    request_item["input_ids"] = request_item["next_input_ids"]
+                    request_item["next_input_ids"] = None
+                    request_item["state"] = states[:, i:i+1]
+                    request_queue.put_nowait(request_item)
+                else:
+                    # Stream and re-enqueue
+                    request_item["stream_queue"].put_nowait(completions[i])
+                    # Update input_ids and re-enqueue
+                    request_item["input_ids"] = new_input_ids[i]
+                    request_item["state"] = states[:, i:i+1]
+                    request_item["token_count"] = request_item["token_count"] + 1
+                    request_queue.put_nowait(request_item)
+            print(f"{time.time():.2f} requests processed")
+        except Exception as e:
+            print(f"Error: {e}")
+            raise e
 def prepare_batch(batch: List[Dict]):
     """
     Prepares a batch of requests for inference.
@@ -206,17 +218,13 @@ def prepare_batch(batch: List[Dict]):
     Returns:
         A tuple containing:
             - A list of input IDs (torch.Tensor) for the entire batch.
-            - A list of request contexts, where each context is a dictionary containing:
-                - "request": The original ChatCompletionRequest object.
-                - "token_count": The number of tokens generated so far for this request.
             - A list of SamplingParams objects for each request in the batch.
             - A list of batched states
     """
     input_ids = [request_item["input_ids"] for request_item in batch]
-    request_contexts = [{"request": request_item["request"], "token_count": request_item.get("token_count", 0)} for request_item in batch]
     sampling_params_list = [create_sampling_params(request_item["request"]) for request_item in batch]
     states = torch.cat([request_item.get("state", model.empty_state(1, device=device)).to(device) for request_item in batch], dim=1) # move states from cpu to gpu
-    return input_ids, request_contexts, sampling_params_list, states
+    return input_ids, sampling_params_list, states
 
 def create_sampling_params(request: ChatCompletionRequest) -> SamplingParams:
     """
@@ -239,14 +247,13 @@ def create_sampling_params(request: ChatCompletionRequest) -> SamplingParams:
     )
 
 
-def sample_and_postprocess(logits: torch.Tensor, input_ids: List[torch.Tensor], request_contexts: List[Dict], sampling_params_list: List[SamplingParams]):
+def sample_and_postprocess(logits: torch.Tensor, batch: List[Dict], sampling_params_list: List[SamplingParams]):
     """
     Samples tokens from the logits and post-processes the generated tokens.
 
     Args:
         logits: The logits tensor from the model output.
-        input_ids: A list of input IDs (torch.Tensor) for each request in the batch.
-        request_contexts: A list of request contexts.
+        batch: A list of request contexts.
         sampling_params_list: A list of SamplingParams objects for each request.
 
     Returns:
@@ -256,22 +263,18 @@ def sample_and_postprocess(logits: torch.Tensor, input_ids: List[torch.Tensor], 
             - A set of indices of requests that have finished generating.
     """
 
-    new_input_ids = [None] * len(input_ids)
-    completions = [""] * len(input_ids)
+    new_input_ids = [None] * len(batch)
+    completions = [""] * len(batch)
     finished_requests = set()
 
-    for i in range(len(input_ids)):
-        request_context = request_contexts[i]
+    for i in range(len(batch)):
+        request_item = batch[i]
         sampling_params = sampling_params_list[i]
-        next_token = sample(logits[i], input_ids[i], request_context, sampling_params)
-
+        next_token = sample(logits[i], request_item['all_ids'], sampling_params)
         # Decode the new token
         new_token = tokenizer.decode(next_token.squeeze(0)) # rwkv tokenizer only support dim=1
         # Update the completion
         completions[i] = new_token
-
-        # Update token count
-        request_context["token_count"] = request_context.get("token_count", 0) + 1
 
         # Check for stop conditions
         stop_criteria_met = False
@@ -280,7 +283,7 @@ def sample_and_postprocess(logits: torch.Tensor, input_ids: List[torch.Tensor], 
                 if stop_seq and stop_seq in new_token:
                     stop_criteria_met = True
                     break
-        if sampling_params.max_completion_tokens and request_context["token_count"] >= sampling_params.max_completion_tokens:
+        if sampling_params.max_completion_tokens and request_item["token_count"] + 1 >= sampling_params.max_completion_tokens:
             stop_criteria_met = True
 
         # If the request is finished, add it to the finished_requests set
@@ -293,14 +296,13 @@ def sample_and_postprocess(logits: torch.Tensor, input_ids: List[torch.Tensor], 
     return new_input_ids, completions, finished_requests
 
 
-def sample(logits: torch.Tensor, input_ids: torch.Tensor, request_context: Dict, sampling_params: SamplingParams) -> torch.Tensor:
+def sample(logits: torch.Tensor, input_ids: torch.Tensor, sampling_params: SamplingParams) -> torch.Tensor:
     """
     Samples a token from the logits using the specified sampling parameters.
 
     Args:
         logits: The logits tensor for the current request.
         input_ids: The input IDs for the current request.
-        request_context: The request context.
         sampling_params: The SamplingParams object for the current request.
 
     Returns:
@@ -320,12 +322,10 @@ def sample(logits: torch.Tensor, input_ids: torch.Tensor, request_context: Dict,
     logits_processor = LogitsProcessorList(logits_processors)
     
     logits.unsqueeze_(0)  # Add a batch dimension
-    input_ids.unsqueeze_(0)  # Add a batch dimension
 
     processed_logits = logits_processor(input_ids, logits)
 
     logits.squeeze_(0)  # Remove the batch dimension
-    input_ids.squeeze_(0)  # Remove the batch dimension
 
     # Sample the next token
     probs = torch.softmax(processed_logits, dim=-1)
@@ -336,6 +336,7 @@ def sample(logits: torch.Tensor, input_ids: torch.Tensor, request_context: Dict,
 @app.post("/v1/chat/completions")
 @app.post("/v1/completions")
 async def chat_completions(request: ChatCompletionRequest, fastapi_request: Request):
+    print(request.json())
     if request.messages:
         # Prepare the prompt
         chat_mode = True
@@ -356,6 +357,8 @@ async def chat_completions(request: ChatCompletionRequest, fastapi_request: Requ
                             "input_ids": input_ids, 
                             "next_input_ids": None, # 用于分chunk处理
                             "stream_queue": stream_queue, 
+                            "token_count": 0,
+                            "all_ids": torch.empty((1, 0), dtype=torch.int32, device=device), # 用于sample
                         }
         request_queue.put_nowait(request_item)
 
@@ -404,7 +407,7 @@ async def chat_completions(request: ChatCompletionRequest, fastapi_request: Requ
                 'model': request.model,
                 'choices': [(
                             {
-                                'delta': {'role': 'assistant', 'content': final_completion},
+                                'message': {'role': 'assistant', 'content': final_completion},
                                 'index': 0,
                                 'finish_reason': None,
                             } if chat_mode else
