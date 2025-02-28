@@ -7,22 +7,18 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, field_validator, model_validator
 
-from transformers.generation.logits_process import (
-    LogitsProcessorList,
-    TemperatureLogitsWarper,
-    TopPLogitsWarper,
-    RepetitionPenaltyLogitsProcessor
-)
+from conRWKV.utils import ChatCompletionRequest, generate_logits_processor, generate_stop_criteria_checker
 
+from transformers.generation.logits_process import LogitsProcessorList
 
 from contextlib import asynccontextmanager
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global background_task
+    global background_task, request_queue
+    request_queue = asyncio.Queue(maxsize=args.max_queue_size)
     load_model()
     # 先跑一次，编译下kernel...
     # TODO: 还有能不能优雅点编译kernel
@@ -52,68 +48,11 @@ app = FastAPI(title="LLM Backend with Continuous Batching",
                 lifespan=lifespan,
                 )
 
-# Request Data Model (OpenAI API format)
-class ChatCompletionRequest(BaseModel):
-    model: str
-    messages: Optional[List[Dict[str, str]]] = None  # [{"role": "user", "content": "..."}]
-    prompt: Optional[str] = None
-    frequency_penalty: Optional[float] = 0.0
-    max_completion_tokens: Optional[int] = None
-    max_tokens: Optional[int] = None # if max_completion_tokens is not set, max_tokens is used for completion
-    n: Optional[int] = 1
-    best_of: Optional[int] = 1
-    seed: Optional[int] = None  # Could be useful for reproducibility. Not implemented here.
-    stop: Optional[Union[str, List[str]]] = None
-    stream: Optional[bool] = False
-    temperature: Optional[float] = 1.0
-    top_p: Optional[float] = 1.0
-    ignore_eos: Optional[bool] = False
-
-    # add validation so user can't set temperature and top_p to 0 at the same time
-    @field_validator("temperature")
-    @classmethod
-    def check_temperature(cls, value, values):
-        if value == 0.0 and values.data.get("top_p") == 0.0:
-            raise ValueError("temperature and top_p cannot both be 0")
-        return value
-
-    @field_validator("top_p")
-    @classmethod
-    def check_top_p(cls, value, values):
-        if value == 0.0 and values.data.get("temperature") == 0.0:
-            raise ValueError("temperature and top_p cannot both be 0")
-        return value
-    
-    # add validation so user can't set both messages and prompt or neither
-    @model_validator(mode='after')
-    def check_messages_prompt(self):
-        if self.messages is not None and self.prompt is not None:
-            raise ValueError("Both messages and prompt cannot be set at the same time")
-        if self.messages is None and self.prompt is None:
-            raise ValueError("Either messages or prompt must be set")
-        return self
-    # n>1 or best_of>1 is not supported yet
-    @model_validator(mode='after')
-    def check_n_best_of(self):
-        if self.n > 1 or self.best_of > 1:
-            raise ValueError("n>1 or best_of>1 is not supported yet")
-        return self
-
-
-class SamplingParams(BaseModel):
-    """Sampling parameters for text generation."""
-
-    n: int = 1
-    temperature: float = 1.0
-    top_p: float = 0.0
-    frequency_penalty: float = 0.0
-    max_completion_tokens: Optional[int] = None
-    stop_sequences: Optional[List[str]] = None
 
 # Global variables
 model = None
 tokenizer = None
-request_queue = asyncio.Queue()
+request_queue = None
 background_task = None
 device = None
 args = None
@@ -155,7 +94,7 @@ async def process_request_queue():
             print(f"{time.time():.2f} processing batch of {len(batch)} requests...")
             
             # 1. Prepare the batch
-            input_ids, sampling_params_list, states = prepare_batch(batch)
+            input_ids, states = prepare_batch(batch)
             print(f"{time.time():.2f} batch prepared")
             
             # 2. Inference Step (Continuous Batching)
@@ -175,7 +114,7 @@ async def process_request_queue():
             
             for i, request_item in enumerate(batch):
                 request_item['all_ids'] = torch.cat([request_item['all_ids'], request_item['input_ids']], dim=1)
-            new_input_ids, completions, finished_requests = sample_and_postprocess(logits, batch, sampling_params_list)
+            new_input_ids, completions, finished_requests = sample_and_postprocess(logits, batch)
             print(f"{time.time():.2f} sampling done")  
             
             
@@ -200,68 +139,20 @@ async def process_request_queue():
                     # Update input_ids and re-enqueue
                     request_item["input_ids"] = new_input_ids[i]
                     request_item["state"] = states[:, i:i+1]
-                    request_item["token_count"] = request_item["token_count"] + 1
+                    request_item["generated_ids"].append(new_input_ids[i][0, 0].item())
+                    request_item["generated_strs"] += completions[i]
                     request_queue.put_nowait(request_item)
             print(f"{time.time():.2f} requests processed")
         except Exception as e:
             print(f"Error: {e}")
             raise e
 def prepare_batch(batch: List[Dict]):
-    """
-    Prepares a batch of requests for inference.
-
-    Args:
-        batch: A list of dictionaries, where each dictionary represents a request and contains:
-            - "request": The ChatCompletionRequest object.
-            - "input_ids": The input IDs for the request (torch.Tensor).
-
-    Returns:
-        A tuple containing:
-            - A list of input IDs (torch.Tensor) for the entire batch.
-            - A list of SamplingParams objects for each request in the batch.
-            - A list of batched states
-    """
     input_ids = [request_item["input_ids"] for request_item in batch]
-    sampling_params_list = [create_sampling_params(request_item["request"]) for request_item in batch]
     states = torch.cat([request_item.get("state", model.empty_state(1, device=device)).to(device) for request_item in batch], dim=1) # move states from cpu to gpu
-    return input_ids, sampling_params_list, states
-
-def create_sampling_params(request: ChatCompletionRequest) -> SamplingParams:
-    """
-    Creates a SamplingParams object from a ChatCompletionRequest.
-
-    Args:
-        request: The ChatCompletionRequest object.
-
-    Returns:
-        A SamplingParams object containing the sampling parameters.
-    """
-
-    return SamplingParams(
-        n=request.n,
-        temperature=request.temperature,
-        top_p=request.top_p,
-        frequency_penalty=request.frequency_penalty,
-        max_completion_tokens=request.max_completion_tokens,
-        stop_sequences=request.stop if isinstance(request.stop, list) else [request.stop] if request.stop else None,
-    )
+    return input_ids, states
 
 
-def sample_and_postprocess(logits: torch.Tensor, batch: List[Dict], sampling_params_list: List[SamplingParams]):
-    """
-    Samples tokens from the logits and post-processes the generated tokens.
-
-    Args:
-        logits: The logits tensor from the model output.
-        batch: A list of request contexts.
-        sampling_params_list: A list of SamplingParams objects for each request.
-
-    Returns:
-        A tuple containing:
-            - A list of new input IDs (torch.Tensor) for the requests that are not finished.
-            - A list of completions (strings) for each request in the batch.  Empty strings for requests that are not yet finished.
-            - A set of indices of requests that have finished generating.
-    """
+def sample_and_postprocess(logits: torch.Tensor, batch: List[Dict]):
 
     new_input_ids = [None] * len(batch)
     completions = [""] * len(batch)
@@ -269,25 +160,14 @@ def sample_and_postprocess(logits: torch.Tensor, batch: List[Dict], sampling_par
 
     for i in range(len(batch)):
         request_item = batch[i]
-        sampling_params = sampling_params_list[i]
-        next_token = sample(logits[i], request_item['all_ids'], sampling_params)
+        next_token = sample(logits[i], request_item['all_ids'], batch[i]['logits_processor'])
         # Decode the new token
         new_token = tokenizer.decode(next_token.squeeze(0)) # rwkv tokenizer only support dim=1
         # Update the completion
         completions[i] = new_token
 
-        # Check for stop conditions
-        stop_criteria_met = False
-        if sampling_params.stop_sequences:
-            for stop_seq in sampling_params.stop_sequences:
-                if stop_seq and stop_seq in new_token:
-                    stop_criteria_met = True
-                    break
-        if sampling_params.max_completion_tokens and request_item["token_count"] + 1 >= sampling_params.max_completion_tokens:
-            stop_criteria_met = True
-
         # If the request is finished, add it to the finished_requests set
-        if stop_criteria_met:
+        if request_item['stop_criteria_checker'](request_item['generated_strs'] + new_token, len(request_item['generated_ids']) + 1):
             finished_requests.add(i)
         else:
             # Otherwise, update the input IDs
@@ -296,30 +176,10 @@ def sample_and_postprocess(logits: torch.Tensor, batch: List[Dict], sampling_par
     return new_input_ids, completions, finished_requests
 
 
-def sample(logits: torch.Tensor, input_ids: torch.Tensor, sampling_params: SamplingParams) -> torch.Tensor:
-    """
-    Samples a token from the logits using the specified sampling parameters.
-
-    Args:
-        logits: The logits tensor for the current request.
-        input_ids: The input IDs for the current request.
-        sampling_params: The SamplingParams object for the current request.
-
-    Returns:
-        A torch.Tensor containing the sampled token ID.
-    """
+def sample(logits: torch.Tensor, input_ids: torch.Tensor, logits_processor: LogitsProcessorList) -> torch.Tensor:
 
     # Apply logits processors (temperature, top_p, frequency_penalty, etc.)
     
-    logits_processors = [
-        TemperatureLogitsWarper(sampling_params.temperature) if sampling_params.temperature > 0 else None,
-        TopPLogitsWarper(sampling_params.top_p) if sampling_params.top_p > 0 else None,
-        RepetitionPenaltyLogitsProcessor(sampling_params.frequency_penalty) if sampling_params.frequency_penalty > 0 else None,
-    ]
-
-    # Filter out None values
-    logits_processors = [processor for processor in logits_processors if processor is not None]
-    logits_processor = LogitsProcessorList(logits_processors)
     
     logits.unsqueeze_(0)  # Add a batch dimension
 
@@ -336,7 +196,7 @@ def sample(logits: torch.Tensor, input_ids: torch.Tensor, sampling_params: Sampl
 @app.post("/v1/chat/completions")
 @app.post("/v1/completions")
 async def chat_completions(request: ChatCompletionRequest, fastapi_request: Request):
-    print(request.json())
+    print(request.model_dump_json())
     if request.messages:
         # Prepare the prompt
         chat_mode = True
@@ -347,8 +207,6 @@ async def chat_completions(request: ChatCompletionRequest, fastapi_request: Requ
     # Tokenize the input
     input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
 
-    if request.max_completion_tokens is None:
-        request.max_completion_tokens = request.max_tokens
 
     async def stream_generator():
         stream_queue:asyncio.Queue = asyncio.Queue()
@@ -357,11 +215,17 @@ async def chat_completions(request: ChatCompletionRequest, fastapi_request: Requ
                             "input_ids": input_ids, 
                             "next_input_ids": None, # 用于分chunk处理
                             "stream_queue": stream_queue, 
-                            "token_count": 0,
                             "all_ids": torch.empty((1, 0), dtype=torch.int32, device=device), # 用于sample
+                            "logits_processor": generate_logits_processor(request),
+                            "stop_criteria_checker": generate_stop_criteria_checker(request),
+                            "generated_ids": [], # 用于stop_criteria_checker
+                            "generated_strs": "", # 用于stop_criteria_checker
                         }
-        request_queue.put_nowait(request_item)
-
+        try:
+            request_queue.put_nowait(request_item)
+        except asyncio.QueueFull:
+            raise HTTPException(status_code=503, detail="Server busy, try again later")
+        
         if request.stream:
             while True:
                 try:
@@ -428,8 +292,9 @@ def main():
     parser = ArgumentParser()
     parser.add_argument("--port", type=int, default=8000, help="Port to run the server on")
     parser.add_argument("--device", type=str, default="cuda:0", help="Device to run the model on")
-    parser.add_argument("--max_seq_len", type=int, default=1048576, help="Max sequence length for input_ids")
-    parser.add_argument("--max_batch_size", type=int, default=128, help="Max batch size for inference, to avoid OOM")
+    parser.add_argument("--max_seq_len", type=int, default=1e6, help="Max sequence length for input_ids")
+    parser.add_argument("--max_batch_size", type=int, default=1e6, help="Max batch size for inference, to avoid OOM")
+    parser.add_argument("--max_queue_size", type=int, default=1e6, help="Max queue size for requests, to avoid OOM")
     parser.add_argument("--model", type=str, default=r"./weights/v7-1.5b.pth", help="path to model weights")
     args = parser.parse_args()
     torch.cuda.set_device(args.device)
