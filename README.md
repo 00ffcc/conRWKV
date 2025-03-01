@@ -4,6 +4,10 @@
     本项目旨在提供一个高并发的RWKV云端推理引擎，以方便后续基于RWKV的应用。
 </div>
 
+### news
+
+部署了一个免费的RWKV v7 2.9B API！地址1.92.129.93(域名备案中)
+
 ### feature
 
 - 支持continuous batching，确保高吞吐量。
@@ -55,6 +59,7 @@ python -m conRWKV.benchmark.benchmark --model rwkv --backend RWKV-Runner --reque
 
 - 正确性验证
 - 缩短ITL, TPOP
+- 支持更多参数
 
 ### acknowledgement
 
