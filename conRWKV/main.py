@@ -8,7 +8,7 @@ from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
-from conRWKV.utils import ChatCompletionRequest, generate_logits_processor, generate_stop_criteria_checker
+from conRWKV.utils import ChatCompletionRequest, generate_logits_processor, output_buffer
 
 from transformers.generation.logits_process import LogitsProcessorList
 
@@ -20,13 +20,6 @@ async def lifespan(app: FastAPI):
     global background_task, request_queue
     request_queue = asyncio.Queue(maxsize=args.max_queue_size)
     load_model()
-    # 先跑一次，编译下kernel...
-    # TODO: 还有能不能优雅点编译kernel
-    with torch.no_grad():
-        state = model.empty_state(1)
-        for T in [1, 16, 32, 64]:
-            input_ids = torch.zeros((1, T), dtype=torch.int32, device=device)
-            model.forward([input_ids], state)
     background_task = asyncio.create_task(process_request_queue())
     yield
     if background_task:
@@ -114,20 +107,15 @@ async def process_request_queue():
             
             for i, request_item in enumerate(batch):
                 request_item['all_ids'] = torch.cat([request_item['all_ids'], request_item['input_ids']], dim=1)
-            new_input_ids, completions, finished_requests = sample_and_postprocess(logits, batch)
+            new_input_ids, completions = sample_and_postprocess(logits, batch)
             print(f"{time.time():.2f} sampling done")  
             
             
             # 4. Handle Streaming and Re-enqueue unfinished requests
             # states = states.to('cpu') TODO: state offload to cpu, offload的话很慢，不offload的话会爆显存
-            print(f"{time.time():.2f} moving states to cpu done")
+            
             for i, request_item in enumerate(batch):
-                if i in finished_requests:
-                    # Complete request
-                    # put final result and None(end marker)
-                    request_item["stream_queue"].put_nowait(completions[i])
-                    request_item["stream_queue"].put_nowait(None)
-                elif request_item["next_input_ids"] is not None:
+                if request_item["next_input_ids"] is not None:
                     # chunk处理，仍然处于prefill阶段
                     request_item["input_ids"] = request_item["next_input_ids"]
                     request_item["next_input_ids"] = None
@@ -135,13 +123,12 @@ async def process_request_queue():
                     request_queue.put_nowait(request_item)
                 else:
                     # Stream and re-enqueue
-                    request_item["stream_queue"].put_nowait(completions[i])
-                    # Update input_ids and re-enqueue
-                    request_item["input_ids"] = new_input_ids[i]
-                    request_item["state"] = states[:, i:i+1]
-                    request_item["generated_ids"].append(new_input_ids[i][0, 0].item())
-                    request_item["generated_strs"] += completions[i]
-                    request_queue.put_nowait(request_item)
+                    if_stop = request_item['buffer'].update(completions[i], new_input_ids[i][0, 0].item())
+                    if not if_stop:
+                        # Update input_ids and re-enqueue
+                        request_item["input_ids"] = new_input_ids[i]
+                        request_item["state"] = states[:, i:i+1]
+                        request_queue.put_nowait(request_item)
             print(f"{time.time():.2f} requests processed")
         except Exception as e:
             print(f"Error: {e}")
@@ -156,7 +143,6 @@ def sample_and_postprocess(logits: torch.Tensor, batch: List[Dict]):
 
     new_input_ids = [None] * len(batch)
     completions = [""] * len(batch)
-    finished_requests = set()
 
     for i in range(len(batch)):
         request_item = batch[i]
@@ -166,14 +152,9 @@ def sample_and_postprocess(logits: torch.Tensor, batch: List[Dict]):
         # Update the completion
         completions[i] = new_token
 
-        # If the request is finished, add it to the finished_requests set
-        if request_item['stop_criteria_checker'](request_item['generated_strs'] + new_token, len(request_item['generated_ids']) + 1):
-            finished_requests.add(i)
-        else:
-            # Otherwise, update the input IDs
-            new_input_ids[i] = next_token
+        new_input_ids[i] = next_token
 
-    return new_input_ids, completions, finished_requests
+    return new_input_ids, completions
 
 
 def sample(logits: torch.Tensor, input_ids: torch.Tensor, logits_processor: LogitsProcessorList) -> torch.Tensor:
@@ -200,7 +181,7 @@ async def chat_completions(request: ChatCompletionRequest, fastapi_request: Requ
     if request.messages:
         # Prepare the prompt
         chat_mode = True
-        prompt = tokenizer.apply_chat_template(request.messages, tokenize=False, add_generation_prompt=True)
+        prompt = tokenizer.apply_chat_template(request.messages, tokenize=False, add_generation_prompt=request.add_generation_prompt)
     else:
         chat_mode = False
         prompt = request.prompt
@@ -214,12 +195,13 @@ async def chat_completions(request: ChatCompletionRequest, fastapi_request: Requ
                             "request": request, 
                             "input_ids": input_ids, 
                             "next_input_ids": None, # 用于分chunk处理
-                            "stream_queue": stream_queue, 
                             "all_ids": torch.empty((1, 0), dtype=torch.int32, device=device), # 用于sample
                             "logits_processor": generate_logits_processor(request),
-                            "stop_criteria_checker": generate_stop_criteria_checker(request),
-                            "generated_ids": [], # 用于stop_criteria_checker
-                            "generated_strs": "", # 用于stop_criteria_checker
+                            "buffer": output_buffer(
+                                stop=request.stop, 
+                                max_completion_tokens=request.max_completion_tokens, 
+                                include_stop_str_in_output = request.include_stop_str_in_output, 
+                                stream_queue=stream_queue),
                         }
         try:
             request_queue.put_nowait(request_item)
@@ -295,6 +277,7 @@ def main():
     parser.add_argument("--max_seq_len", type=int, default=1e6, help="Max sequence length for input_ids")
     parser.add_argument("--max_batch_size", type=int, default=1e6, help="Max batch size for inference, to avoid OOM")
     parser.add_argument("--max_queue_size", type=int, default=1e6, help="Max queue size for requests, to avoid OOM")
+    parser.add_argument("--max_completion_tokens", type=int, default=500, help="Max number of tokens to generate")
     parser.add_argument("--model", type=str, default=r"./weights/v7-1.5b.pth", help="path to model weights")
     args = parser.parse_args()
     torch.cuda.set_device(args.device)

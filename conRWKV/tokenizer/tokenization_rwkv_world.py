@@ -546,4 +546,6 @@ class RWKVWorldTokenizer(PreTrainedTokenizer):
             "user": "User: ",
             "assistant": "Assistant: ",
         }
+        # 删除role不在roles中的消息
+        messages = [msg for msg in messages if msg['role'] in roles]
         return "\n\n".join([f"{roles[msg['role']]}{msg['content']}" for msg in messages]) + ("\n\nAssistant:" if add_generation_prompt else "")
