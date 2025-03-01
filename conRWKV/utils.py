@@ -9,6 +9,21 @@ from transformers.generation.logits_process import (
 )
 import asyncio
 
+import logging
+from logging import handlers
+
+log = logging.getLogger('conRWKV')
+log.setLevel(logging.INFO)
+fmt = logging.Formatter('%(asctime)s:%(levelname)s:%(funcName)s:%(message)s')
+sh = logging.StreamHandler()
+sh.setLevel(logging.INFO)
+sh.setFormatter(fmt)
+log.addHandler(sh)
+fh = handlers.TimedRotatingFileHandler(filename='conRWKV.log',when='D')
+fh.setLevel(logging.INFO)
+fh.setFormatter(fmt)
+log.addHandler(fh)
+
 # Request Data Model (OpenAI API format)
 class ChatCompletionRequest(BaseModel):
     model: str

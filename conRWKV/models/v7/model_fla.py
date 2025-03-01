@@ -16,6 +16,7 @@ torch.backends.cuda.matmul.allow_tf32 = True
 # torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = True
 torch._C._jit_set_autocast_mode(False)
 import time
+from conRWKV.utils import log
 
 # DTYPE = torch.bfloat16
 DTYPE = torch.half # better
@@ -318,7 +319,7 @@ class RWKV(nn.Module):
 
         assert idx.shape[0] == 1, "batch size must be 1"
         assert state.shape[1] == (cu_seqlens.shape[0] - 1) + (idx.shape[-1] - cu_seqlens[-1]), f"state shape error {state.shape[1]} {cu_seqlens.shape[0]-1} {idx.shape[-1] - cu_seqlens[-1]}"
-        print(f"{time.time():.2f} prefill: {cu_seqlens.shape[0] - 1} batches, {cu_seqlens[-1]} tokens; decoding: {idx.shape[-1] - cu_seqlens[-1]} tokens")
+        log.info(f"prefill: {cu_seqlens.shape[0] - 1} batches, {cu_seqlens[-1]} tokens; decoding: {idx.shape[-1] - cu_seqlens[-1]} tokens")
 
         x = self.emb(idx)
         x = self.ln0(x)

@@ -8,7 +8,7 @@ from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
-from conRWKV.utils import ChatCompletionRequest, generate_logits_processor, output_buffer
+from conRWKV.utils import ChatCompletionRequest, generate_logits_processor, output_buffer, log
 
 from transformers.generation.logits_process import LogitsProcessorList
 
@@ -65,7 +65,6 @@ def load_model():
 async def process_request_queue():
     while True:
         try:
-            # print(f"{time.time():.2f} waiting for requests...")
             batch = []
             # input_ids的总长度不能超过args.max_seq_len
             for _ in range(args.max_batch_size):
@@ -84,11 +83,11 @@ async def process_request_queue():
             if not batch:
                 await asyncio.sleep(0.03)  # Avoid busy-waiting if the queue is empty
                 continue
-            print(f"{time.time():.2f} processing batch of {len(batch)} requests...")
+            log.info(f"processing batch of {len(batch)} requests...")
             
             # 1. Prepare the batch
             input_ids, states = prepare_batch(batch)
-            print(f"{time.time():.2f} batch prepared")
+            log.info("batch prepared")
             
             # 2. Inference Step (Continuous Batching)
             try:
@@ -96,11 +95,11 @@ async def process_request_queue():
                     logits, states = model(input_ids, state=states)     
             except Exception as e:
                 # Handle model inference errors.  Important to catch and log.
-                print(f"Inference error: {e}")
+                log.error(f"Inference error: {e}")
                 for request_item in batch:
                     request_item["exception"] = e
                 continue
-            print(f"{time.time():.2f} inference done")  
+            log.info("inference done")  
 
 
             # 3. Sampling Step (Token Generation) and Post-processing
@@ -108,7 +107,7 @@ async def process_request_queue():
             for i, request_item in enumerate(batch):
                 request_item['all_ids'] = torch.cat([request_item['all_ids'], request_item['input_ids']], dim=1)
             new_input_ids, completions = sample_and_postprocess(logits, batch)
-            print(f"{time.time():.2f} sampling done")  
+            log.info("sampling done")  
             
             
             # 4. Handle Streaming and Re-enqueue unfinished requests
@@ -129,9 +128,9 @@ async def process_request_queue():
                         request_item["input_ids"] = new_input_ids[i]
                         request_item["state"] = states[:, i:i+1]
                         request_queue.put_nowait(request_item)
-            print(f"{time.time():.2f} requests processed")
+            log.info("requests processed")
         except Exception as e:
-            print(f"Error: {e}")
+            log.error(f"Error: {e}")
             raise e
 def prepare_batch(batch: List[Dict]):
     input_ids = [request_item["input_ids"] for request_item in batch]
