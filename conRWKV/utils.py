@@ -89,7 +89,7 @@ class ChatCompletionRequest(BaseModel):
         if isinstance(self.stop, str):
             self.stop = [self.stop]
         if self.stop is None:
-            self.stop = [] if self.prompt is not None else ['\n\nUser']
+            self.stop = [] if self.prompt is not None else ['\n\nUser', '\n\nUser:', 'User:', 'Q: ']
         if self.ignore_eos:
             self.stop = []
         return self

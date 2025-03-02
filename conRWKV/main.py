@@ -176,7 +176,7 @@ def sample(logits: torch.Tensor, input_ids: torch.Tensor, logits_processor: Logi
 @app.post("/v1/chat/completions")
 @app.post("/v1/completions")
 async def chat_completions(request: ChatCompletionRequest, fastapi_request: Request):
-    print(request.model_dump_json())
+    log.critical(request.model_dump_json())
     if request.messages:
         # Prepare the prompt
         chat_mode = True
@@ -273,10 +273,10 @@ def main():
     parser = ArgumentParser()
     parser.add_argument("--port", type=int, default=8000, help="Port to run the server on")
     parser.add_argument("--device", type=str, default="cuda:0", help="Device to run the model on")
-    parser.add_argument("--max_seq_len", type=int, default=1e6, help="Max sequence length for input_ids")
-    parser.add_argument("--max_batch_size", type=int, default=1e6, help="Max batch size for inference, to avoid OOM")
-    parser.add_argument("--max_queue_size", type=int, default=1e6, help="Max queue size for requests, to avoid OOM")
-    parser.add_argument("--max_completion_tokens", type=int, default=500, help="Max number of tokens to generate")
+    parser.add_argument("--max_seq_len", type=int, default=int(1e6), help="Max sequence length for input_ids")
+    parser.add_argument("--max_batch_size", type=int, default=int(1e6), help="Max batch size for inference, to avoid OOM")
+    parser.add_argument("--max_queue_size", type=int, default=int(1e6), help="Max queue size for requests, to avoid OOM")
+    parser.add_argument("--max_completion_tokens", type=int, default=1024, help="Max number of tokens to generate")
     parser.add_argument("--model", type=str, default=r"./weights/v7-1.5b.pth", help="path to model weights")
     args = parser.parse_args()
     torch.cuda.set_device(args.device)
