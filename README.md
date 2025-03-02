@@ -4,6 +4,11 @@
     本项目旨在提供一个高并发的RWKV云端推理引擎，以方便后续基于RWKV的应用。
 </div>
 
+### news
+
+- 3.2 部署了一个免费的RWKV v7 2.9B API！地址1.92.129.93(域名备案中)，欢迎来玩！
+- 3.3 用api测了大海捞针，结果很有意思:)
+
 ### feature
 
 - 支持continuous batching，确保高吞吐量。
@@ -50,11 +55,29 @@ curl http://127.0.0.1:8000/switch-model -X POST -H "Content-Type: application/js
 python -m conRWKV.benchmark.benchmark --model rwkv --backend RWKV-Runner --request-rate 2 --num-prompts 1200
 python -m conRWKV.benchmark.benchmark --model rwkv --backend RWKV-Runner --request-rate 4 --num-prompts 1200
 ```
+### 支持的参数
+
+支持OpenAI api协议中的常用参数。
+- **model**: 填什么都行，并没有什么意义。
+- **messages/prompt**: messages用于chat模式，prompt用于续写模式。为了方便起见使用同一个url。
+- **frequency_penalty**: 频率惩罚。
+- **max_completion_tokens/max_tokens**: 最多生成的token数量，优先使用max_completion_tokens。
+- **n**: 目前只支持n=1。
+- **best_of**: 目前只支持best_of=1。
+- **seed**: 尚未实现。
+- **stop**: 默认为 `['\n\nUser', '\n\nUser:', 'User:']`，因为rwkv v7容易忘记在 `User:` 前加入 `\n\n`。（SFT的问题？）
+- **stream**: 是否流式返回。
+- **temperature**: 温度，用于采样。
+- **top_p**: 用于采样。
+- **ignore_eos**: 是否忽略stop, 用于benchmark测试。
+- **include_stop_str_in_output**: 是否在输出中包含stop里的内容。
+- **add_generation_prompt**: 是否要加上 `\n\nAssistant:`
 
 ### todolist
 
 - 正确性验证
 - 缩短ITL, TPOP
+- 支持更多参数
 
 ### acknowledgement
 
