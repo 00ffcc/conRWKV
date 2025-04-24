@@ -6,12 +6,11 @@ setup(
     description="conRWKV",
     author="00ffcc",  
     author_email="guizhiyu@mail.ustc.edu.cn",
-    packages=["conRWKV"],
-    package_dir={"conRWKV": "conRWKV"},
+    packages=find_packages(),
     install_requires=[
         'fastapi',
         'uvicorn',
-        'fla @ git+https://github.com/00ffcc/flash-linear-attention.git@main#egg=fla',
+        'flash-linear-attention @ git+https://github.com/fla-org/flash-linear-attention',
     ],
     entry_points={
         'console_scripts': [

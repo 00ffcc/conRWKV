@@ -6,6 +6,7 @@
 
 ### News
 
+- 4.24 fla版本切换至主线 (可能产生性能差异，测试中)
 - ~3.2 部署了一个免费的 RWKV v7 2.9B API！地址 1.92.129.93(域名备案中)，欢迎来玩！~ 暂时没了
 - 3.3 用 API 测了大海捞针，结果很有意思:)
 
@@ -23,9 +24,6 @@
 pip install git+https://github.com/00ffcc/conRWKV.git@master
 conRWKV --model /path/to/pth
 ```
-> [!WARNING]
->
-> **注意：** 为了防止 triton 在处理变长数据时反复重新编译 kernel，conRWKV 中使用的 [fla](https://github.com/00ffcc/flash-linear-attention) 与[官方版本](https://github.com/fla-org/flash-linear-attention/)略有不同，安装前需要删除原有的 fla 或新开一个虚拟环境。
 
 ### Benchmark
 

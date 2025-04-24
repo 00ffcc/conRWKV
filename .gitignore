@@ -29,4 +29,5 @@ coling_latex.*
 *.pth
 **.egg-info/** */
 **.egg-info/**
+*.egg-info
 *.jsonl
