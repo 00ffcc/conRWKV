@@ -11,6 +11,7 @@ import asyncio
 
 import logging
 from logging import handlers
+from conRWKV.config import config
 
 log = logging.getLogger('conRWKV')
 log.setLevel(logging.INFO)
@@ -79,8 +80,8 @@ class ChatCompletionRequest(BaseModel):
         if self.max_completion_tokens is None and self.max_tokens is not None:
             self.max_completion_tokens = self.max_tokens
         if self.max_completion_tokens is None:
-            from conRWKV.main import args
-            self.max_completion_tokens = args.max_completion_tokens
+            # from conRWKV.main import args
+            self.max_completion_tokens = config.max_completion_tokens
         return self
 
     # 如果stop是str，则转为list。如果为None，则设置为[] 或 ['\n\nUser'](根据是否是chat模式)

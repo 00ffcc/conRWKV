@@ -13,12 +13,12 @@ from conRWKV.utils import ChatCompletionRequest, generate_logits_processor, outp
 from transformers.generation.logits_process import LogitsProcessorList
 
 from contextlib import asynccontextmanager
-
+from conRWKV.config import config  # 导入 config 对象
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global background_task, request_queue
-    request_queue = asyncio.Queue(maxsize=args.max_queue_size)
+    request_queue = asyncio.Queue(maxsize=config.max_queue_size)
     load_model()
     background_task = asyncio.create_task(process_request_queue())
     yield
@@ -48,16 +48,16 @@ tokenizer = None
 request_queue = None
 background_task = None
 device = None
-args = None
+# args = None
 from conRWKV.models.v7.model_fla import RWKV
 from conRWKV.tokenizer.tokenization_rwkv_world import RWKVWorldTokenizer
 def load_model():
     global model, tokenizer, device
-    device = args.device
+    device = config.device
     import os
     dir_path = os.path.dirname(os.path.abspath(__file__))
     tokenizer=RWKVWorldTokenizer(vocab_file=rf"{dir_path}/tokenizer/rwkv_vocab_v20230424.txt")
-    model = RWKV.from_pretrained(args.model, device=device)
+    model = RWKV.from_pretrained(config.model, device=device)
     model.eval()
     
 
@@ -67,15 +67,15 @@ async def process_request_queue():
         try:
             batch = []
             # input_ids的总长度不能超过args.max_seq_len
-            for _ in range(args.max_batch_size):
+            for _ in range(config.max_batch_size):
                 try:
                     request_item = await asyncio.wait_for(request_queue.get(), timeout=0.01)  # Non-blocking get with timeout
                     sum_len = sum(len(request_item["input_ids"][0]) for request_item in batch)
-                    if sum_len + len(request_item["input_ids"][0]) > args.max_seq_len:
-                        request_item["next_input_ids"] = request_item["input_ids"][:, args.max_seq_len-sum_len:]
-                        request_item["input_ids"] = request_item["input_ids"][:, :args.max_seq_len-sum_len]
+                    if sum_len + len(request_item["input_ids"][0]) > config.max_seq_len:
+                        request_item["next_input_ids"] = request_item["input_ids"][:, config.max_seq_len-sum_len:]
+                        request_item["input_ids"] = request_item["input_ids"][:, :config.max_seq_len-sum_len]
                     batch.append(request_item)
-                    if sum_len + len(request_item["input_ids"][0]) == args.max_seq_len:
+                    if sum_len + len(request_item["input_ids"][0]) == config.max_seq_len:
                         break
                 except asyncio.TimeoutError:
                     break  # No more requests in the queue
@@ -267,7 +267,7 @@ async def chat_completions(request: ChatCompletionRequest, fastapi_request: Requ
     return StreamingResponse(stream_generator(), media_type="text/event-stream")
 
 def main():
-    global args
+    # global args
     import uvicorn
     from argparse import ArgumentParser
     parser = ArgumentParser()
@@ -278,8 +278,9 @@ def main():
     parser.add_argument("--max_queue_size", type=int, default=int(1e6), help="Max queue size for requests, to avoid OOM")
     parser.add_argument("--max_completion_tokens", type=int, default=1024, help="Max number of tokens to generate")
     parser.add_argument("--model", type=str, default=r"./weights/v7-1.5b.pth", help="path to model weights")
-    args = parser.parse_args()
-    torch.cuda.set_device(args.device)
-    uvicorn.run(app, host="0.0.0.0", port=args.port, log_level="info")
+    parsed_args = parser.parse_args()
+    config.update(parsed_args)  # 更新 config
+    torch.cuda.set_device(config.device)  # 使用 config
+    uvicorn.run(app, host="0.0.0.0", port=config.port, log_level="info")
 if __name__ == "__main__":
     main()
